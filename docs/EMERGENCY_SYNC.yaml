@@ -1,0 +1,8 @@
+project: "Bozor"
+last_known_stage: "0.1"
+critical_info:
+  - "Backend-only, Go, микросервисы, PostgreSQL db-per-service"
+  - "NATS JetStream, Typesense, Redis, MinIO, Docker Compose"
+  - "Telegram-авторизация по номеру телефона через бота"
+open_blockers: []
+last_update: "2026-07-06"

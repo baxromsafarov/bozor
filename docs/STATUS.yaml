@@ -1,0 +1,79 @@
+status_id: "20260706-213648"
+project: "Bozor"
+version: "1.0"
+
+current:
+  chapter: "0"                     # CHAPTER 0: Foundations & Platform
+  stage: "0.2"                     # STAGE 0.2: Общие библиотеки pkg/shared
+  status: "in_progress"
+
+completed:
+  - stage_id: "0.1"
+    title: "Repo & monorepo structure, tooling"
+    completed_date: "2026-07-06"
+    evidence: "git-репо (main); SPMS-файлы в /docs (9 документов, кросс-проверены); структура монорепо (/services, /pkg/shared, /api, /deploy, /scripts); Makefile; .golangci.yml (v2, lint чистый на pkg/shared); CI-скелет .github/workflows/ci.yml (lint/test/build/govulncheck); PR-шаблон; .env.example; go.work + модуль pkg/shared собирается"
+
+in_progress:
+  stage_id: "0.2"
+  title: "Общие библиотеки /pkg/shared"
+  progress_percent: 0
+  tasks_completed: 0
+  tasks_total: 7
+  tasks:
+    - "config: чтение конфигурации из env"
+    - "logging: slog JSON + trace/request id из контекста"
+    - "errors: доменные ошибки + RFC 7807"
+    - "otel: init трейсинга/метрик + graceful shutdown"
+    - "httpx: middleware (request-id, recover, logging), JSON-хелперы, health, graceful server"
+    - "events+natsx: envelope CloudEvents-lite, subjects, JetStream publish/consume + DLQ"
+    - "outbox: enqueue в транзакции + relay-воркер + идемпотентность консьюмера; pgxx: пул/tx; authx: JWT"
+
+next_actions:
+  - "Предзагрузить зависимости pkg/shared (go get) одним коммитом go.mod/go.sum"
+  - "Реализовать пакеты pkg/shared с unit-тестами (table-driven)"
+  - "Прогнать lint + test + build по workspace"
+  - "Далее Stage 0.3: скелет docker-compose инфраструктуры"
+
+decisions:                         # краткие ссылки; полные ADR — в DECISIONS.md
+  - decision: "Брокер — NATS JetStream (не Kafka) ради лёгкости на Compose"
+    rationale: "Меньший ресурсный след на одном хосте; Kafka — замена при высоком throughput"
+    date: "2026-07-06"
+    alternatives: ["Kafka"]
+  - decision: "Поиск — Typesense (не OpenSearch)"
+    rationale: "Лёгкий, фасеты/typo/гео; OpenSearch — замена при сложных агрегатах"
+    date: "2026-07-06"
+    alternatives: ["OpenSearch", "PostgreSQL FTS"]
+  - decision: "Telegram-авторизация по номеру через бота (request_contact)"
+    rationale: "Работает без фронтенда; nonce/deep-link связывает клиентскую сессию"
+    date: "2026-07-06"
+    alternatives: ["Login Widget", "Mini App initData"]
+  - decision: "Catalog и Location — отдельные сервисы (без объединения в reference)"
+    rationale: "Следуем схеме db-per-service из ТЗ; сервисы на Go дёшевы по ресурсам"
+    date: "2026-07-06"
+    alternatives: ["Единый reference-сервис"]
+  - decision: "Доступ к БД — pgx + чистые репозитории (без sqlc)"
+    rationale: "Динамические фильтры листинга/поиска неудобны в sqlc; меньше codegen-зависимостей"
+    date: "2026-07-06"
+    alternatives: ["sqlc"]
+
+open_questions: []
+
+tech_stack:
+  language: ["Go 1.26"]
+  gateway: ["nginx", "API Gateway (Go, chi)"]
+  services: ["auth", "user-profile", "catalog", "location", "listing-ads", "media", "search", "favorites-savedsearch", "chat", "notification", "moderation", "payments-promotions", "reviews"]
+  datastores: ["PostgreSQL (db-per-service)", "PgBouncer", "Redis"]
+  messaging: ["NATS JetStream"]
+  search: ["Typesense"]
+  storage: ["MinIO", "CDN"]
+  observability: ["OpenTelemetry", "Prometheus", "Grafana", "Loki", "Tempo"]
+  payments: ["Payme", "Click", "Mock"]
+  deploy: ["Docker Compose", "nginx"]
+
+metrics:
+  completed_stages: 1
+  total_stages: 52
+  completion_percentage: 2
+  estimated_remaining_stages: 51
+
+notes: "Backend-only, фронтенда нет. Целевая нагрузка: десятки тысяч DAU. Автономный режим работы подтверждён заказчиком. Коммиты — от имени baxromsafarov. Окружение: Windows 11, Go 1.26.4, Docker Desktop, golangci-lint 2.12.2, goose, buf."
