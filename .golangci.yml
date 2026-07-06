@@ -1,0 +1,44 @@
+# golangci-lint v2 — единый конфиг для всех модулей монорепо.
+version: "2"
+
+run:
+  timeout: 5m
+  tests: true
+
+linters:
+  default: standard # errcheck, govet, ineffassign, staticcheck, unused
+  enable:
+    - bodyclose
+    - goconst
+    - gocritic
+    - gosec
+    - misspell
+    - noctx
+    - prealloc
+    - revive
+    - rowserrcheck
+    - sqlclosecheck
+    - unconvert
+    - unparam
+    - whitespace
+  settings:
+    revive:
+      rules:
+        - name: package-comments
+          disabled: true # пакеты внутренних сервисов не требуют godoc-комментариев
+    gocritic:
+      disabled-checks:
+        - ifElseChain
+  exclusions:
+    rules:
+      # В тестах допустимы константы в строках и слабые генераторы случайности
+      - path: _test\.go
+        linters:
+          - goconst
+          - gosec
+          - noctx
+
+formatters:
+  enable:
+    - gofmt
+    - goimports

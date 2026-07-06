@@ -1,0 +1,78 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  GO_VERSION: "1.26.x"
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - name: golangci-lint (все модули workspace)
+        uses: golangci/golangci-lint-action@v8
+        with:
+          version: latest
+          args: --timeout=5m
+          # прогоняем из корня; для мультимодульности линт запускается per-module ниже
+      - name: lint remaining modules
+        run: |
+          for dir in $(go list -m -f '{{.Dir}}'); do
+            echo "== lint $dir"
+            (cd "$dir" && golangci-lint run --timeout=5m ./...)
+          done
+
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - name: go test (все модули workspace, -race)
+        run: |
+          for dir in $(go list -m -f '{{.Dir}}'); do
+            echo "== test $dir"
+            (cd "$dir" && go test -race -count=1 ./...)
+          done
+
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    needs: [lint, test]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - name: go build (все модули workspace)
+        run: |
+          for dir in $(go list -m -f '{{.Dir}}'); do
+            echo "== build $dir"
+            (cd "$dir" && go build ./...)
+          done
+
+  vuln:
+    name: govulncheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - name: govulncheck (все модули workspace)
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          for dir in $(go list -m -f '{{.Dir}}'); do
+            echo "== govulncheck $dir"
+            (cd "$dir" && govulncheck ./...)
+          done
