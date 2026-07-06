@@ -22,6 +22,8 @@ linters:
     - unparam
     - whitespace
   settings:
+    goconst:
+      min-occurrences: 5 # 3 по умолчанию слишком агрессивно: ключи карт и switch-кейсы
     revive:
       rules:
         - name: package-comments

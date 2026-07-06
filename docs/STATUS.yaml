@@ -1,38 +1,40 @@
-status_id: "20260706-213648"
+status_id: "20260706-220030"
 project: "Bozor"
 version: "1.0"
 
 current:
   chapter: "0"                     # CHAPTER 0: Foundations & Platform
-  stage: "0.2"                     # STAGE 0.2: Общие библиотеки pkg/shared
+  stage: "0.3"                     # STAGE 0.3: Скелет docker-compose инфраструктуры
   status: "in_progress"
 
 completed:
   - stage_id: "0.1"
     title: "Repo & monorepo structure, tooling"
     completed_date: "2026-07-06"
-    evidence: "git-репо (main); SPMS-файлы в /docs (9 документов, кросс-проверены); структура монорепо (/services, /pkg/shared, /api, /deploy, /scripts); Makefile; .golangci.yml (v2, lint чистый на pkg/shared); CI-скелет .github/workflows/ci.yml (lint/test/build/govulncheck); PR-шаблон; .env.example; go.work + модуль pkg/shared собирается"
+    evidence: "git-репо (main, origin=github.com/baxromsafarov/bozor); SPMS-файлы в /docs (9 документов, кросс-проверены); структура монорепо; Makefile; .golangci.yml (v2); CI-конфиг (.github/ci.yml.pending — активируется при токене со scope workflow); PR-шаблон; .env.example; go.work + модуль pkg/shared"
+  - stage_id: "0.2"
+    title: "Общие библиотеки /pkg/shared"
+    completed_date: "2026-07-06"
+    evidence: "11 пакетов: config, logging (slog JSON + trace/request id), apperr (RFC 7807, uz/ru), events (envelope CloudEvents-lite + 18 subjects + DLQ), httpx (request-id/recover/access-log/lang, DecodeJSON, WriteProblem, health/ready, graceful Serve), otelx (OTLP gRPC + пропагаторы), grpcx (otel + recovery), pgxx (пул + WithTx), natsx (JetStream publish/consume, дедуп по Nats-Msg-Id, Nak/DLQ), authx (JWT HS256, ротация — на уровне auth-сервиса; middleware Auth/RequireRole/FromForwardedHeaders), outbox (Enqueue + Relay SKIP LOCKED + inbox-идемпотентность). go test: 10 пакетов ok; golangci-lint: 0 issues; go mod tidy применён"
 
 in_progress:
-  stage_id: "0.2"
-  title: "Общие библиотеки /pkg/shared"
+  stage_id: "0.3"
+  title: "Скелет docker-compose: PostgreSQL+PgBouncer, Redis, NATS, Typesense, MinIO, nginx"
   progress_percent: 0
   tasks_completed: 0
-  tasks_total: 7
+  tasks_total: 5
   tasks:
-    - "config: чтение конфигурации из env"
-    - "logging: slog JSON + trace/request id из контекста"
-    - "errors: доменные ошибки + RFC 7807"
-    - "otel: init трейсинга/метрик + graceful shutdown"
-    - "httpx: middleware (request-id, recover, logging), JSON-хелперы, health, graceful server"
-    - "events+natsx: envelope CloudEvents-lite, subjects, JetStream publish/consume + DLQ"
-    - "outbox: enqueue в транзакции + relay-воркер + идемпотентность консьюмера; pgxx: пул/tx; authx: JWT"
+    - "deploy/compose/docker-compose.yml: postgres (+init db-per-service), pgbouncer, redis, nats -js, typesense, minio (+создание бакета), nginx"
+    - "healthcheck'и всех контейнеров, именованные volumes, внутренняя сеть"
+    - "deploy/nginx/nginx.conf: edge с апстримом на будущий gateway"
+    - "docker-compose.override.yml (dev: проброс портов) и заготовка prod-профиля"
+    - "Проверка: docker compose up -d, все контейнеры healthy"
 
 next_actions:
-  - "Предзагрузить зависимости pkg/shared (go get) одним коммитом go.mod/go.sum"
-  - "Реализовать пакеты pkg/shared с unit-тестами (table-driven)"
-  - "Прогнать lint + test + build по workspace"
-  - "Далее Stage 0.3: скелет docker-compose инфраструктуры"
+  - "Собрать deploy/compose/docker-compose.yml со всей инфраструктурой"
+  - "Init-скрипт PostgreSQL: 12 БД по сервисам"
+  - "Поднять и проверить healthcheck'и"
+  - "Далее Stage 0.4: API Gateway"
 
 decisions:                         # краткие ссылки; полные ADR — в DECISIONS.md
   - decision: "Брокер — NATS JetStream (не Kafka) ради лёгкости на Compose"
@@ -71,9 +73,9 @@ tech_stack:
   deploy: ["Docker Compose", "nginx"]
 
 metrics:
-  completed_stages: 1
+  completed_stages: 2
   total_stages: 52
-  completion_percentage: 2
-  estimated_remaining_stages: 51
+  completion_percentage: 4
+  estimated_remaining_stages: 50
 
-notes: "Backend-only, фронтенда нет. Целевая нагрузка: десятки тысяч DAU. Автономный режим работы подтверждён заказчиком. Коммиты — от имени baxromsafarov. Окружение: Windows 11, Go 1.26.4, Docker Desktop, golangci-lint 2.12.2, goose, buf."
+notes: "Backend-only, фронтенда нет. Целевая нагрузка: десятки тысяч DAU. Автономный режим работы подтверждён заказчиком. Коммиты — от имени baxromsafarov. Окружение: Windows 11, Go 1.26.4, Docker Desktop, golangci-lint 2.12.2, goose, buf. Нюанс: локально go test без -race (нет cgo на Windows); -race выполняется в CI на Ubuntu. goconst min-occurrences=5."
