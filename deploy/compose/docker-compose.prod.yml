@@ -23,6 +23,8 @@ services:
     <<: *prod
   minio:
     <<: *prod
+  gateway:
+    <<: *prod
   nginx:
     <<: *prod
     ports:
