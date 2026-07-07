@@ -35,6 +35,8 @@ services:
     <<: *prod
   gateway:
     <<: *prod
+  auth:
+    <<: *prod
   nginx:
     <<: *prod
     ports:

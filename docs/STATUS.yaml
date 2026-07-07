@@ -1,10 +1,10 @@
-status_id: "20260708-010000"
+status_id: "20260708-020000"
 project: "Bozor"
 version: "1.0"
 
 current:
   chapter: "1"                     # CHAPTER 1: Auth & Identity (Telegram bot phone-auth)
-  stage: "1.1"                     # STAGE 1.1: Настройка Telegram-бота + скелет Auth-сервиса
+  stage: "1.2"                     # STAGE 1.2: Phone-auth flow (nonce/deep-link, request_contact, upsert)
   status: "not_started"
 
 completed:
@@ -32,10 +32,14 @@ completed:
     title: "Фреймворк миграций goose (forward-only) + сиды — CHAPTER 0 завершён"
     completed_date: "2026-07-08"
     evidence: "pkg/shared/migrate: Up(ctx, dsn, fs.FS) поверх goose v3 provider API (forward-only, только Up) с сессионным advisory-lock Postgres (goose.WithSessionLocker) для сериализации реплик; sql-драйвер pgx stdlib. Сиды = идемпотентные миграции (INSERT ... ON CONFLICT DO NOTHING), ADR-007. Godoc-пример подключения в сервисе + предупреждение: DSN напрямую к postgres:5432, НЕ через PgBouncer (сессионный лок несовместим с transaction-пулингом — ADR-013). Тесты: unit (bad/unparsable DSN) + integration на testcontainers-go (реальный postgres:18) — прогон с нуля (2 миграции), проверка сида (2 строки), идемпотентность повтора (0, без дублей), build-tag integration; go test -tags=integration PASS (8.9s). Makefile: цель test-integration. golangci-lint 0 issues (default и integration build)"
+  - stage_id: "1.1"
+    title: "Telegram webhook (secret token) + скелет Auth-сервиса + схема БД"
+    completed_date: "2026-07-08"
+    evidence: "services/auth (модуль bozor/services/auth в go.work). Миграция 00001_init_auth: users (telegram_user_id UNIQUE, phone, status CHECK), refresh_tokens (token_hash bytea UNIQUE, family_id, device_id — под ротацию/reuse-detection ADR-012), auth_audit_log, outbox (DDL синхр. с pkg/shared/outbox). Миграции применяются при старте через pkg/shared/migrate по прямому DSN к postgres:5432 (не PgBouncer, ADR-013); рантайм-пул — через pgbouncer:6432. Транспорт: chi + middleware из pkg/shared (recover/request-id/lang/access-log/otel) + health/ready(postgres ping)/metrics; POST /api/v1/auth/telegram/webhook — constant-time проверка X-Telegram-Bot-Api-Secret-Token, толерантный декодер update (payload Telegram шире модели). Dockerfile: build-local go.work (go work init pkg/shared + сервис) → distroless static nonroot, healthcheck /auth -health. Тесты unit (config DSN, webhook 401/200/422, tolerant, health, 404); golangci-lint 0 issues. Живая проверка: 14/14 healthy; миграции applied=1 (4 таблицы+goose), рестарт→applied=0 (идемпотентно); webhook 401/200/422 напрямую и через gateway (routing /api/v1/auth→auth, 200 не 503); Prometheus up{job=auth}=1; логи auth в Loki (svc=auth). Также починены Dockerfile'ы gateway/auth под рост go.work"
 
 next_actions:
-  - "Stage 1.1 (CHAPTER 1): Telegram-бот (webhook + secret token X-Telegram-Bot-Api-Secret-Token) + скелет Auth-сервиса; БД users (+ refresh_tokens, auth_audit_log), первые goose-миграции сервиса"
-  - "Далее 1.2–1.5: phone-auth flow (nonce/deep-link, request_contact), выпуск/ротация JWT (ADR-012), reuse-detection"
+  - "Stage 1.2: phone-auth flow — POST /auth/session/init (nonce в Redis, TTL, single-use) + deep-link; обработка contact в webhook (проверка contact.user_id==from.id, E.164), upsert user, связывание nonce; GET /auth/session/{nonce}; событие bozor.user.created через outbox"
+  - "Далее 1.3–1.5: выпуск/ротация JWT (ADR-012), refresh-семейства + reuse-detection, logout, аудит"
 
 decisions:                         # краткие ссылки; полные ADR — в DECISIONS.md
   - decision: "Брокер — NATS JetStream (не Kafka) ради лёгкости на Compose"
@@ -86,10 +90,10 @@ tech_stack:
   deploy: ["Docker Compose", "nginx"]
 
 metrics:
-  completed_stages: 6
+  completed_stages: 7
   total_stages: 52
-  completion_percentage: 12
-  estimated_remaining_stages: 46
+  completion_percentage: 13
+  estimated_remaining_stages: 45
   chapters_completed: ["0"]        # CHAPTER 0 (Foundations & Platform) завершён
 
 notes: "Backend-only, фронтенда нет. Целевая нагрузка: десятки тысяч DAU. Автономный режим работы подтверждён заказчиком. Коммиты — от имени baxromsafarov. Окружение: Windows 11, Go 1.26.4, Docker Desktop 29.2.1 + Compose v5, golangci-lint 2.12.2, goose, buf. Нюанс: локально go test без -race (нет cgo на Windows); -race выполняется в CI на Ubuntu. goconst min-occurrences=5. Инфра-нюансы (Stage 0.3): postgres:18 монтирует /var/lib/postgresql (не .../data); healthcheck typesense — через bash /dev/tcp (нет curl/wget/nc в образе). Локальный .env создаётся из .env.example (gitignore)."
