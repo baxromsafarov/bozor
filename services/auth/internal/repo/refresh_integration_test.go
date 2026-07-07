@@ -183,3 +183,31 @@ func TestRefreshRotate_Expired(t *testing.T) {
 	assert.ErrorIs(t, err, domain.ErrTokenExpired)
 	assert.True(t, isRevoked(t, pool, hash), "истёкший токен помечается погашенным")
 }
+
+func TestRefreshRevokeFamily_Logout(t *testing.T) {
+	ctx := context.Background()
+	pool := startAuthDB(t)
+	r := repo.NewRefreshRepo(pool)
+	userID := insertUser(t, pool, 1005)
+	family := newFamily(t)
+
+	// Два активных токена в одном семействе (напр. после ротации).
+	hash1 := insertRefresh(t, r, userID, family, time.Now().Add(time.Hour))
+	hash2 := insertRefresh(t, r, userID, family, time.Now().Add(time.Hour))
+
+	uid, found, err := r.RevokeFamily(ctx, hash1)
+	require.NoError(t, err)
+	assert.True(t, found)
+	assert.Equal(t, userID, uid)
+	assert.True(t, isRevoked(t, pool, hash1))
+	assert.True(t, isRevoked(t, pool, hash2), "logout отзывает всё семейство")
+
+	// Идемпотентность и неизвестный токен.
+	_, found2, err := r.RevokeFamily(ctx, hash1)
+	require.NoError(t, err)
+	assert.True(t, found2, "повторный logout — не ошибка")
+
+	_, foundUnknown, err := r.RevokeFamily(ctx, domain.HashRefreshToken("nope"))
+	require.NoError(t, err)
+	assert.False(t, foundUnknown, "неизвестный токен → found=false")
+}

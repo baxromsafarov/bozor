@@ -29,6 +29,7 @@ import (
 
 	"bozor/services/auth/internal/app"
 	"bozor/services/auth/internal/config"
+	"bozor/services/auth/internal/ratelimit"
 	"bozor/services/auth/internal/repo"
 	"bozor/services/auth/internal/session"
 	"bozor/services/auth/internal/telegram"
@@ -37,6 +38,12 @@ import (
 )
 
 const serviceName = "auth"
+
+// Лимиты частоты (запросов в минуту на IP) для публичных эндпоинтов.
+const (
+	initRateLimit    = 10  // инициация логина
+	webhookRateLimit = 120 // доставки вебхука Telegram
+)
 
 func main() {
 	healthcheck := flag.Bool("health", false, "выполнить self health-check по /healthz и выйти")
@@ -120,21 +127,29 @@ func run() error {
 
 	userRepo := repo.NewUserRepo(pool)
 	refreshRepo := repo.NewRefreshRepo(pool)
+	auditRepo := repo.NewAuditRepo(pool)
 	signer := authx.NewSigner(cfg.JWTSigningKey, serviceName, cfg.JWTAccessTTL)
-	tokenSvc := app.NewTokenService(signer, refreshRepo, cfg.JWTRefreshTTL)
+	tokenSvc := app.NewTokenService(signer, refreshRepo, auditRepo, cfg.JWTRefreshTTL, log)
 
+	limiter := ratelimit.New(rdb)
 	svc := app.NewService(userRepo)
 	bot := telegram.New(cfg.TelegramBotToken)
 	webhook := transport.NewWebhookHandler(cfg.TelegramWebhookSecret, svc, bot, sessions, log)
 	sessionHandler := transport.NewSessionHandler(sessions, tokenSvc, cfg.TelegramBotUsername, log)
 	tokenHandler := transport.NewTokenHandler(tokenSvc, log)
+	meHandler := transport.NewMeHandler()
 
 	router := transport.NewRouter(transport.Deps{
 		Log:            log,
 		Webhook:        webhook,
 		Session:        sessionHandler,
 		Token:          tokenHandler,
+		Me:             meHandler,
 		MetricsHandler: metricsHandler,
+		InitRateLimit: ratelimit.Middleware(limiter, "init",
+			initRateLimit, time.Minute, ratelimit.ClientIPKey, log),
+		WebhookRateLimit: ratelimit.Middleware(limiter, "webhook",
+			webhookRateLimit, time.Minute, ratelimit.ClientIPKey, log),
 		ReadyChecks: map[string]httpx.Check{
 			"postgres": pool.Ping,
 			"nats": func(context.Context) error {

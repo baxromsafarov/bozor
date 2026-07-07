@@ -72,3 +72,25 @@ func TestRefresh_MalformedBody(t *testing.T) {
 	rec := postRefresh(t, &fakeTokens{}, `{not json`)
 	assert.Equal(t, http.StatusUnprocessableEntity, rec.Code)
 }
+
+func postLogout(t *testing.T, tokens Tokens, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	h := NewTokenHandler(tokens, discardLogger())
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/logout", strings.NewReader(body))
+	rec := httptest.NewRecorder()
+	h.Logout(rec, req)
+	return rec
+}
+
+func TestLogout_Success(t *testing.T) {
+	tokens := &fakeTokens{}
+	rec := postLogout(t, tokens, `{"refresh_token":"r1"}`)
+	assert.Equal(t, http.StatusNoContent, rec.Code)
+	assert.Equal(t, "r1", tokens.logoutToken, "refresh-токен передан в logout")
+}
+
+func TestLogout_MissingToken(t *testing.T) {
+	rec := postLogout(t, &fakeTokens{}, `{}`)
+	assert.Equal(t, http.StatusUnprocessableEntity, rec.Code)
+	assert.Contains(t, rec.Body.String(), "missing_refresh_token")
+}

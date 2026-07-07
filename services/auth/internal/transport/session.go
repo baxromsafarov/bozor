@@ -119,7 +119,7 @@ func (h *SessionHandler) Status(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	pair, err := h.tokens.IssueForUser(r.Context(), consumed.UserID, deviceID)
+	pair, err := h.tokens.IssueForUser(r.Context(), consumed.UserID, deviceID, clientIP(r))
 	if err != nil {
 		httpx.WriteProblem(w, r, err)
 		return

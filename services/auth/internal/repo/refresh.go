@@ -122,6 +122,44 @@ func (r *RefreshRepo) Rotate(ctx context.Context, oldHash []byte, expectedDevice
 	return res, nil
 }
 
+// RevokeFamily отзывает всё семейство refresh-токена, найденного по хешу
+// (logout). Возвращает user_id владельца и признак того, что токен найден.
+// Идемпотентна: повторный вызов ничего не меняет, но user_id вернёт.
+func (r *RefreshRepo) RevokeFamily(ctx context.Context, hash []byte) (string, bool, error) {
+	var (
+		userID   string
+		familyID string
+	)
+	err := pgxx.WithTx(ctx, r.pool, func(tx pgx.Tx) error {
+		e := tx.QueryRow(ctx, `
+			SELECT user_id, family_id FROM refresh_tokens WHERE token_hash = $1
+		`, hash).Scan(&userID, &familyID)
+		if errors.Is(e, pgx.ErrNoRows) {
+			return errNoToken
+		}
+		if e != nil {
+			return fmt.Errorf("repo: чтение refresh-токена: %w", e)
+		}
+		if _, e := tx.Exec(ctx, `
+			UPDATE refresh_tokens SET revoked_at = now()
+			WHERE family_id = $1 AND revoked_at IS NULL
+		`, familyID); e != nil {
+			return fmt.Errorf("repo: отзыв семейства при logout: %w", e)
+		}
+		return nil
+	})
+	if errors.Is(err, errNoToken) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	return userID, true, nil
+}
+
+// errNoToken — внутренний маркер «токен не найден» для RevokeFamily.
+var errNoToken = errors.New("refresh-токен не найден")
+
 // auditReuse записывает событие обнаружения повторного использования токена.
 func auditReuse(ctx context.Context, tx pgx.Tx, userID, familyID string) error {
 	id, err := uuid.NewV7()

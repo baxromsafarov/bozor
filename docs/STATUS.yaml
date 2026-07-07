@@ -1,10 +1,10 @@
-status_id: "20260708-200000"
+status_id: "20260709-000000"
 project: "Bozor"
 version: "1.0"
 
 current:
-  chapter: "1"                     # CHAPTER 1: Auth & Identity (Telegram bot phone-auth)
-  stage: "1.5"                     # STAGE 1.5: Auth-middleware в gateway, logout, аудит, rate-limit — завершение CHAPTER 1
+  chapter: "2"                     # CHAPTER 2: Catalog & Location
+  stage: "2.1"                     # STAGE 2.1: Location-сервис + сид регионов/городов Узбекистана
   status: "not_started"
 
 completed:
@@ -48,10 +48,14 @@ completed:
     title: "JWT access + refresh: ротация, reuse-detection (отзыв семейства), привязка к устройству"
     completed_date: "2026-07-08"
     evidence: "Access-JWT через pkg/shared/authx.Signer (HS256, claims roles/sub/iss/exp/iat/jti, TTL 15 мин из JWT_ACCESS_TTL). Refresh — непрозрачный случайный токен (32 байта base64url), в БД только SHA-256 хеш (token_hash bytea), TTL 30 дней (JWT_REFRESH_TTL=720h). Domain: TokenPair, NewRefreshToken/HashRefreshToken, sentinel ErrTokenNotFound/Expired/Reuse/DeviceMismatch, DTO RefreshInsert/RotationResult. RefreshRepo.Rotate — атомарно (pgxx.WithTx, SELECT FOR UPDATE): активный не истёкший токен с совпадающим device гасится (revoked_at) и заменяется новым в том же family_id; предъявление уже погашенного токена = reuse → отзыв всего семейства + запись auth_audit_log(refresh_reuse_detected). ВАЖНО: доменный исход возвращается ПОСЛЕ коммита через переменную outcome — иначе return err из WithTx откатил бы отзыв семейства/гашение (этот баг был найден интеграционными тестами и исправлен). app.TokenService: IssueForUser (новое семейство, пустой device_id → генерируется) и Refresh (маппинг доменных ошибок → 401 без утечки). Транспорт: POST /api/v1/auth/refresh {refresh_token, device_id}; выпуск токенов встроен в завершение логина — GET /session/{nonce} при confirmed одноразово (Redis GETDEL, гонку выигрывает первый опрос) выдаёт пару и принимает опциональный device_id. Конфиг: JWT_SIGNING_KEY (общий с gateway, required), JWT_ACCESS_TTL/REFRESH_TTL (config.Duration). Тесты: unit (domain, TokenService issue/refresh/маппинг ошибок с проверкой подписи через authx.Parse; session confirmed→токены/гонка/bad-device; refresh-хендлер 200/422/401) + integration на testcontainers postgres (rotate happy-path, reuse→отзыв семейства+аудит, device-mismatch, not-found, expired) — go test -tags=integration PASS; golangci-lint 0 issues (default+integration). Живая проверка (14/14 healthy): confirmed poll → access(decoded: roles=[user],iss=auth,sub=user_id,exp/iat/jti)+refresh+Bearer+expires_in899+device_id; повторный poll→expired (single-use); gateway принимает валидный access (200, проброс), отклоняет мусорный bearer (401) — общий JWT_SIGNING_KEY работает; refresh-ротация выдаёт новую пару; повтор старого refresh→401 token_reuse_detected; после reuse новый refresh тоже отозван (семейство убито) →401; refresh_tokens: family 2/2 revoked, auth_audit_log 2×refresh_reuse_detected"
+  - stage_id: "1.5"
+    title: "Auth в gateway, logout, аудит, rate-limit — CHAPTER 1 завершён"
+    completed_date: "2026-07-08"
+    evidence: "Защищённый маршрут: GET /api/v1/auth/me — auth читает идентичность через authx.FromForwardedHeaders (X-User-Id/X-User-Roles, проставленные gateway после проверки access-JWT в 0.4); анонимный запрос → 401. Logout: POST /api/v1/auth/logout {refresh_token} → RefreshRepo.RevokeFamily отзывает всё семейство (идемпотентно), app.TokenService.Logout + аудит; 204. Аудит: domain.AuditEntry + repo.AuditRepo.Log (user_id/ip NULL при пустых, невалидный IP → NULL через net.ParseIP); best-effort из TokenService (login при выпуске, token_refreshed при ротации, logout); reuse пишется в самой tx ротации. Rate-limit: internal/ratelimit — фиксированное окно в Redis (INCR+PTTL+EXPIRE), fail-open при недоступности Redis, 429 RFC 7807 + Retry-After; middleware на POST /session/init (10/мин на IP) и /telegram/webhook (120/мин на IP), ключ по X-Forwarded-For/RemoteAddr. Тесты: unit (me auth/anon; logout 204/422; ratelimit middleware allow/deny/fail-open + ClientIPKey; TokenService logout+аудит) + integration на testcontainers (postgres: RevokeFamily+идемпотентность, AuditRepo login/NULL-ip; redis: fixed-window allow→deny→reset) — go test -tags=integration PASS (ratelimit 6.6s, repo 25.3s); golangci-lint 0 issues (default+integration). Живая проверка (14/14 healthy): /me с валидным access→200 {user_id,roles:[user]}; аноним→401; ПОДМЕНА X-User-Id на gateway срезается→401 (security); logout→204, затем refresh отозванного→401 token_reuse_detected; 13× init→9×201 затем 429 + Retry-After:42 (10/мин на общий IP-ключ; лишний +1 от логина через gateway с тем же XFF); auth_audit_log: login/logout/refresh_reuse_detected. CHAPTER 1 DoD выполнен: сквозной вход бот→JWT, refresh/ротация/logout работают, чужой контакт отклоняется"
 
 next_actions:
-  - "Stage 1.5 (завершение CHAPTER 1): интеграция authx.Auth в gateway для защищённых маршрутов, POST /auth/logout (отзыв семейства refresh по device), полный аудит чувствительных действий (login/logout/refresh), rate-limit на session/init и telegram/webhook"
-  - "Затем CHAPTER 2 (Catalog & Location): Location-сервис + сид регионов/городов Узбекистана, дерево категорий, атрибуты"
+  - "Stage 2.1 (CHAPTER 2 — Catalog & Location): Location-сервис, таблицы regions/cities (name_uz/name_ru, гео), сид реальными данными Узбекистана (Ташкент+районы, Самарканд, Бухара и т.д.), API GET /regions, GET /regions/{id}/cities"
+  - "Далее 2.2–2.4: Catalog — дерево категорий (CRUD admin/moderator, кеш Redis), атрибуты категорий с наследованием, публичные API + кеширование"
 
 decisions:                         # краткие ссылки; полные ADR — в DECISIONS.md
   - decision: "Брокер — NATS JetStream (не Kafka) ради лёгкости на Compose"
@@ -102,10 +106,10 @@ tech_stack:
   deploy: ["Docker Compose", "nginx"]
 
 metrics:
-  completed_stages: 10
+  completed_stages: 11
   total_stages: 52
-  completion_percentage: 19
-  estimated_remaining_stages: 42
-  chapters_completed: ["0"]        # CHAPTER 0 (Foundations & Platform) завершён
+  completion_percentage: 21
+  estimated_remaining_stages: 41
+  chapters_completed: ["0", "1"]   # CHAPTER 0 (Foundations), CHAPTER 1 (Auth & Identity) завершены
 
 notes: "Backend-only, фронтенда нет. Целевая нагрузка: десятки тысяч DAU. Автономный режим работы подтверждён заказчиком. Коммиты — от имени baxromsafarov. Окружение: Windows 11, Go 1.26.4, Docker Desktop 29.2.1 + Compose v5, golangci-lint 2.12.2, goose, buf. Нюанс: локально go test без -race (нет cgo на Windows); -race выполняется в CI на Ubuntu. goconst min-occurrences=5. Инфра-нюансы (Stage 0.3): postgres:18 монтирует /var/lib/postgresql (не .../data); healthcheck typesense — через bash /dev/tcp (нет curl/wget/nc в образе). Локальный .env создаётся из .env.example (gitignore)."

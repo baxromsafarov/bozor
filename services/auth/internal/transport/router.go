@@ -10,11 +10,15 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"bozor/pkg/shared/apperr"
+	"bozor/pkg/shared/authx"
 	"bozor/pkg/shared/httpx"
 	"bozor/pkg/shared/otelx"
 )
 
 const serviceName = "auth"
+
+// Middleware — псевдоним для HTTP-миддлвари (rate-limit и т.п.).
+type Middleware = func(http.Handler) http.Handler
 
 // Deps — зависимости для сборки роутера Auth-сервиса.
 type Deps struct {
@@ -22,8 +26,13 @@ type Deps struct {
 	Webhook        *WebhookHandler
 	Session        *SessionHandler
 	Token          *TokenHandler
+	Me             *MeHandler
 	ReadyChecks    map[string]httpx.Check
 	MetricsHandler http.Handler
+
+	// Пер-роутовые лимитеры (nil — без ограничения).
+	InitRateLimit    Middleware
+	WebhookRateLimit Middleware
 }
 
 // NewRouter собирает HTTP-роутер Auth-сервиса.
@@ -44,19 +53,27 @@ func NewRouter(d Deps) http.Handler {
 	}
 
 	r.Route("/api/v1/auth", func(auth chi.Router) {
-		// Вебхук Telegram: подлинность — по X-Telegram-Bot-Api-Secret-Token.
-		auth.Post("/telegram/webhook", d.Webhook.Handle)
+		// Идентичность, проброшенная gateway после проверки access-JWT.
+		auth.Use(authx.FromForwardedHeaders)
+
+		// Вебхук Telegram: подлинность — по X-Telegram-Bot-Api-Secret-Token
+		// (rate-limit по IP как защита от флуда доставок).
+		applyMW(auth, d.WebhookRateLimit).Post("/telegram/webhook", d.Webhook.Handle)
 
 		// Логин по nonce/deep-link: клиент инициирует вход и опрашивает статус.
 		if d.Session != nil {
-			auth.Post("/session/init", d.Session.Init)
+			applyMW(auth, d.InitRateLimit).Post("/session/init", d.Session.Init)
 			auth.Get("/session/{nonce}", d.Session.Status)
 		}
-		// Ротация refresh-токена на новую пару.
+		// Ротация refresh-токена и выход (отзыв семейства).
 		if d.Token != nil {
 			auth.Post("/refresh", d.Token.Refresh)
+			auth.Post("/logout", d.Token.Logout)
 		}
-		// logout — Stage 1.5.
+		// Идентичность текущего пользователя (защищённый маршрут).
+		if d.Me != nil {
+			auth.Get("/me", d.Me.Me)
+		}
 	})
 
 	notFound := func(w http.ResponseWriter, req *http.Request) {
@@ -67,4 +84,12 @@ func NewRouter(d Deps) http.Handler {
 	r.MethodNotAllowed(notFound)
 
 	return r
+}
+
+// applyMW возвращает роутер с применённой миддлварью mw либо исходный при nil.
+func applyMW(r chi.Router, mw Middleware) chi.Router {
+	if mw == nil {
+		return r
+	}
+	return r.With(mw)
 }

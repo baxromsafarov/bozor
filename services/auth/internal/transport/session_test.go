@@ -44,22 +44,33 @@ func (f *fakeSessionStore) Consume(context.Context, string) (session.Session, er
 	return f.got, f.consumeErr
 }
 
-// fakeTokens подменяет выпуск токенов.
+// fakeTokens подменяет выпуск/ротацию/отзыв токенов.
 type fakeTokens struct {
 	gotUserID   string
 	gotDeviceID string
+	gotIP       string
+	logoutToken string
 	pair        domain.TokenPair
 	err         error
+	logoutErr   error
 }
 
-func (f *fakeTokens) IssueForUser(_ context.Context, userID, deviceID string) (domain.TokenPair, error) {
+func (f *fakeTokens) IssueForUser(_ context.Context, userID, deviceID, clientIP string) (domain.TokenPair, error) {
 	f.gotUserID = userID
 	f.gotDeviceID = deviceID
+	f.gotIP = clientIP
 	return f.pair, f.err
 }
 
-func (f *fakeTokens) Refresh(_ context.Context, _, _ string) (domain.TokenPair, error) {
+func (f *fakeTokens) Refresh(_ context.Context, _, _, clientIP string) (domain.TokenPair, error) {
+	f.gotIP = clientIP
 	return f.pair, f.err
+}
+
+func (f *fakeTokens) Logout(_ context.Context, refreshToken, clientIP string) error {
+	f.logoutToken = refreshToken
+	f.gotIP = clientIP
+	return f.logoutErr
 }
 
 func sessionRouter(h *SessionHandler) http.Handler {
