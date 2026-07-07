@@ -285,6 +285,8 @@ services:
         condition: service_healthy
       pgbouncer:             # рантайм-пул — через pgbouncer:6432
         condition: service_healthy
+      nats:                  # publish событий из outbox → JetStream
+        condition: service_healthy
       tempo:
         condition: service_started
     healthcheck:

@@ -3,6 +3,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -10,16 +11,23 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
+	"bozor/pkg/shared/events"
 	"bozor/pkg/shared/httpx"
 	"bozor/pkg/shared/logging"
 	"bozor/pkg/shared/migrate"
+	"bozor/pkg/shared/natsx"
 	"bozor/pkg/shared/otelx"
+	"bozor/pkg/shared/outbox"
 	"bozor/pkg/shared/pgxx"
 
+	"bozor/services/auth/internal/app"
 	"bozor/services/auth/internal/config"
+	"bozor/services/auth/internal/repo"
+	"bozor/services/auth/internal/telegram"
 	"bozor/services/auth/internal/transport"
 	"bozor/services/auth/migrations"
 )
@@ -76,12 +84,48 @@ func run() error {
 	}
 	defer pool.Close()
 
+	// NATS JetStream + relay: события из outbox публикуются в шину.
+	nc, js, err := natsx.Connect(cfg.NATSURL, serviceName)
+	if err != nil {
+		return fmt.Errorf("подключение к NATS: %w", err)
+	}
+	defer nc.Close()
+	if _, err := natsx.EnsureStream(ctx, js, events.StreamName, []string{events.SubjectsWildcard}); err != nil {
+		return fmt.Errorf("создание стрима: %w", err)
+	}
+
+	relay := &outbox.Relay{
+		Pool:    pool,
+		Publish: func(ctx context.Context, env events.Envelope) error { return natsx.Publish(ctx, js, env) },
+		Log:     log,
+	}
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		if err := relay.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
+			log.Error("outbox relay остановлен с ошибкой", slog.String("error", err.Error()))
+		}
+	}()
+	defer wg.Wait() // дождаться завершения relay до nc.Close (defer LIFO)
+
+	userRepo := repo.NewUserRepo(pool)
+	svc := app.NewService(userRepo)
+	bot := telegram.New(cfg.TelegramBotToken)
+	webhook := transport.NewWebhookHandler(cfg.TelegramWebhookSecret, svc, bot, log)
+
 	router := transport.NewRouter(transport.Deps{
 		Log:            log,
-		Webhook:        transport.NewWebhookHandler(cfg.TelegramWebhookSecret, log),
+		Webhook:        webhook,
 		MetricsHandler: metricsHandler,
 		ReadyChecks: map[string]httpx.Check{
 			"postgres": pool.Ping,
+			"nats": func(context.Context) error {
+				if !nc.IsConnected() {
+					return errors.New("nats: нет соединения")
+				}
+				return nil
+			},
 		},
 	})
 

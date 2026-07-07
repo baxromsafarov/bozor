@@ -1,10 +1,10 @@
-status_id: "20260708-020000"
+status_id: "20260708-120000"
 project: "Bozor"
 version: "1.0"
 
 current:
   chapter: "1"                     # CHAPTER 1: Auth & Identity (Telegram bot phone-auth)
-  stage: "1.2"                     # STAGE 1.2: Phone-auth flow (nonce/deep-link, request_contact, upsert)
+  stage: "1.3"                     # STAGE 1.3: Nonce/deep-link — связывание клиентской сессии с Telegram-логином
   status: "not_started"
 
 completed:
@@ -36,10 +36,14 @@ completed:
     title: "Telegram webhook (secret token) + скелет Auth-сервиса + схема БД"
     completed_date: "2026-07-08"
     evidence: "services/auth (модуль bozor/services/auth в go.work). Миграция 00001_init_auth: users (telegram_user_id UNIQUE, phone, status CHECK), refresh_tokens (token_hash bytea UNIQUE, family_id, device_id — под ротацию/reuse-detection ADR-012), auth_audit_log, outbox (DDL синхр. с pkg/shared/outbox). Миграции применяются при старте через pkg/shared/migrate по прямому DSN к postgres:5432 (не PgBouncer, ADR-013); рантайм-пул — через pgbouncer:6432. Транспорт: chi + middleware из pkg/shared (recover/request-id/lang/access-log/otel) + health/ready(postgres ping)/metrics; POST /api/v1/auth/telegram/webhook — constant-time проверка X-Telegram-Bot-Api-Secret-Token, толерантный декодер update (payload Telegram шире модели). Dockerfile: build-local go.work (go work init pkg/shared + сервис) → distroless static nonroot, healthcheck /auth -health. Тесты unit (config DSN, webhook 401/200/422, tolerant, health, 404); golangci-lint 0 issues. Живая проверка: 14/14 healthy; миграции applied=1 (4 таблицы+goose), рестарт→applied=0 (идемпотентно); webhook 401/200/422 напрямую и через gateway (routing /api/v1/auth→auth, 200 не 503); Prometheus up{job=auth}=1; логи auth в Loki (svc=auth). Также починены Dockerfile'ы gateway/auth под рост go.work"
+  - stage_id: "1.2"
+    title: "Phone-auth flow: request_contact — валидация владения, E.164, upsert, публикация bozor.user.created"
+    completed_date: "2026-07-08"
+    evidence: "Домен: NormalizePhoneUZ (E.164 +998########, из 12 цифр с 998 или 9 цифр) + NormalizeLang; sentinel ErrContactNotOwned/ErrInvalidPhone. Транспорт webhook: на /start бот шлёт кнопку request_contact (SendContactRequest, ReplyKeyboard request_contact:true), на contact — RegisterContact; локализация uz/ru; вебхук всегда 2xx для Telegram, бизнес-ошибки уходят ответом бота. КРИТИЧНО для безопасности: contact.user_id должен ==from.id (иначе ErrContactNotOwned) — пересланный чужой контакт отклоняется («отправьте свой номер»). App: RegisterContact нормализует телефон, генерирует UUIDv7, строит событие userCreated БЕЗ PII (только user_id, telegram_user_id, language_code). Repo UpsertUserWithEvent: pgxx.WithTx → INSERT ... ON CONFLICT(telegram_user_id) DO UPDATE ... RETURNING (xmax=0) AS created; событие в outbox только при created=true (идемпотентно, повторный контакт не плодит события). Тесты: unit (нормализация телефона/языка, webhook: свой контакт регистрируется/пересланный отклоняется/start шлёт кнопку) + integration на testcontainers (реальный postgres:18: первый апсерт created=true + 1 событие; повтор created=false, событий по-прежнему 1, телефон обновлён) — go test -tags=integration PASS; golangci-lint 0 issues. Живая проверка end-to-end (14/14 healthy): вебхук с валидным контактом → пользователь в users + событие в outbox → outbox.Relay (SKIP LOCKED) публикует bozor.user.created в JetStream (published_at выставляется только после успешной публикации); подтверждено: стрим BOZOR messages=2, published=t по обоим событиям. Впервые вживую проверен весь путь событий webhook→БД+outbox(одна tx)→relay→NATS"
 
 next_actions:
-  - "Stage 1.2: phone-auth flow — POST /auth/session/init (nonce в Redis, TTL, single-use) + deep-link; обработка contact в webhook (проверка contact.user_id==from.id, E.164), upsert user, связывание nonce; GET /auth/session/{nonce}; событие bozor.user.created через outbox"
-  - "Далее 1.3–1.5: выпуск/ротация JWT (ADR-012), refresh-семейства + reuse-detection, logout, аудит"
+  - "Stage 1.3: nonce/deep-link — POST /auth/session/init (nonce в Redis, TTL 2-5 мин, single-use) + deep-link t.me/<bot>?start=<nonce>; связывание клиентской сессии с Telegram-логином; GET /auth/session/{nonce} → pending/confirmed/expired"
+  - "Далее 1.4–1.5: выпуск/ротация JWT (ADR-012), refresh-семейства + reuse-detection, logout, аудит, rate-limit на gateway"
 
 decisions:                         # краткие ссылки; полные ADR — в DECISIONS.md
   - decision: "Брокер — NATS JetStream (не Kafka) ради лёгкости на Compose"
@@ -90,10 +94,10 @@ tech_stack:
   deploy: ["Docker Compose", "nginx"]
 
 metrics:
-  completed_stages: 7
+  completed_stages: 8
   total_stages: 52
-  completion_percentage: 13
-  estimated_remaining_stages: 45
+  completion_percentage: 15
+  estimated_remaining_stages: 44
   chapters_completed: ["0"]        # CHAPTER 0 (Foundations & Platform) завершён
 
 notes: "Backend-only, фронтенда нет. Целевая нагрузка: десятки тысяч DAU. Автономный режим работы подтверждён заказчиком. Коммиты — от имени baxromsafarov. Окружение: Windows 11, Go 1.26.4, Docker Desktop 29.2.1 + Compose v5, golangci-lint 2.12.2, goose, buf. Нюанс: локально go test без -race (нет cgo на Windows); -race выполняется в CI на Ubuntu. goconst min-occurrences=5. Инфра-нюансы (Stage 0.3): postgres:18 монтирует /var/lib/postgresql (не .../data); healthcheck typesense — через bash /dev/tcp (нет curl/wget/nc в образе). Локальный .env создаётся из .env.example (gitignore)."

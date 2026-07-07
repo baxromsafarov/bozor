@@ -26,9 +26,15 @@ type Config struct {
 	// advisory-lock goose несовместим с transaction-пулингом (ADR-013).
 	MigrateDSN string
 
+	// NATSURL — адрес NATS JetStream для публикации доменных событий.
+	NATSURL string
+
 	// TelegramWebhookSecret — ожидаемое значение заголовка
 	// X-Telegram-Bot-Api-Secret-Token во входящих вебхуках Telegram.
 	TelegramWebhookSecret string
+	// TelegramBotToken — токен бота для исходящих вызовов Bot API. Пустой —
+	// отправка сообщений отключена (dev без реального бота).
+	TelegramBotToken string
 }
 
 // Load читает конфигурацию из окружения (fail-fast на обязательных ключах).
@@ -50,7 +56,9 @@ func Load() (*Config, error) {
 		MigrateDSN: dsn(user, pass,
 			config.String("POSTGRES_HOST", "postgres"),
 			config.String("POSTGRES_PORT", "5432")),
+		NATSURL:               config.String("NATS_URL", "nats://nats:4222"),
 		TelegramWebhookSecret: config.String("TELEGRAM_WEBHOOK_SECRET", ""),
+		TelegramBotToken:      config.String("TELEGRAM_BOT_TOKEN", ""),
 	}, nil
 }
 
