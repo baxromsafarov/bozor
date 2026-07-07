@@ -24,6 +24,11 @@ const (
 	SubjectUserUpdated = "bozor.user.updated"
 	SubjectUserBanned  = "bozor.user.banned"
 
+	// Категории каталога.
+	SubjectCategoryCreated = "bozor.category.created"
+	SubjectCategoryUpdated = "bozor.category.updated"
+	SubjectCategoryDeleted = "bozor.category.deleted"
+
 	// Чат.
 	SubjectChatMessageSent = "bozor.chat.message_sent"
 

@@ -1,10 +1,10 @@
-status_id: "20260709-040000"
+status_id: "20260709-080000"
 project: "Bozor"
 version: "1.0"
 
 current:
   chapter: "2"                     # CHAPTER 2: Catalog & Location
-  stage: "2.2"                     # STAGE 2.2: Catalog — дерево категорий (CRUD admin/moderator, кеш Redis)
+  stage: "2.3"                     # STAGE 2.3: Атрибуты категорий (типы, наследование, сид 12 разделов OLX.uz)
   status: "not_started"
 
 completed:
@@ -53,14 +53,18 @@ completed:
     completed_date: "2026-07-08"
     evidence: "Защищённый маршрут: GET /api/v1/auth/me — auth читает идентичность через authx.FromForwardedHeaders (X-User-Id/X-User-Roles, проставленные gateway после проверки access-JWT в 0.4); анонимный запрос → 401. Logout: POST /api/v1/auth/logout {refresh_token} → RefreshRepo.RevokeFamily отзывает всё семейство (идемпотентно), app.TokenService.Logout + аудит; 204. Аудит: domain.AuditEntry + repo.AuditRepo.Log (user_id/ip NULL при пустых, невалидный IP → NULL через net.ParseIP); best-effort из TokenService (login при выпуске, token_refreshed при ротации, logout); reuse пишется в самой tx ротации. Rate-limit: internal/ratelimit — фиксированное окно в Redis (INCR+PTTL+EXPIRE), fail-open при недоступности Redis, 429 RFC 7807 + Retry-After; middleware на POST /session/init (10/мин на IP) и /telegram/webhook (120/мин на IP), ключ по X-Forwarded-For/RemoteAddr. Тесты: unit (me auth/anon; logout 204/422; ratelimit middleware allow/deny/fail-open + ClientIPKey; TokenService logout+аудит) + integration на testcontainers (postgres: RevokeFamily+идемпотентность, AuditRepo login/NULL-ip; redis: fixed-window allow→deny→reset) — go test -tags=integration PASS (ratelimit 6.6s, repo 25.3s); golangci-lint 0 issues (default+integration). Живая проверка (14/14 healthy): /me с валидным access→200 {user_id,roles:[user]}; аноним→401; ПОДМЕНА X-User-Id на gateway срезается→401 (security); logout→204, затем refresh отозванного→401 token_reuse_detected; 13× init→9×201 затем 429 + Retry-After:42 (10/мин на общий IP-ключ; лишний +1 от логина через gateway с тем же XFF); auth_audit_log: login/logout/refresh_reuse_detected. CHAPTER 1 DoD выполнен: сквозной вход бот→JWT, refresh/ротация/logout работают, чужой контакт отклоняется"
 
+  - stage_id: "2.2"
+    title: "Catalog: дерево категорий — CRUD (admin/moderator), кеш Redis, события"
+    completed_date: "2026-07-08"
+    evidence: "services/catalog (модуль bozor/services/catalog в go.work). Миграция 00001: categories (id uuid PK, parent_id self-FK ON DELETE RESTRICT, slug UNIQUE, name_uz/ru, level, материализованный path по slug, sort_order, is_active; индексы по parent/path) + outbox (DDL синхр. с pkg/shared/outbox). Домен: Category, TreeNode, BuildTree (плоский список→дерево, висячий родитель→корень); sentinel ErrCategoryNotFound/ParentNotFound/HasChildren/SlugConflict. Repo: All (ORDER BY level,sort_order), GetByID, CreateWithEvent/UpdateWithEvent/DeleteWithEvent (pgxx.WithTx + outbox.Enqueue одной транзакцией; unique-violation 23505→ErrSlugConflict; удаление с потомками→ErrHasChildren). App.Service: TreeJSON (cache-aside: Redis catalog:tree или БД→build→кеш), Create (вычисляет level/path от родителя, событие bozor.category.created, инвалидация кеша), Update (имена/порядок/активность; slug/parent неизменяемы для стабильности path), Delete; все записи публикуют bozor.category.* и сбрасывают кеш. Новые subjects в pkg/shared/events (category.created/updated/deleted). Транспорт: GET /api/v1/categories (публично, из кеша, плоский путь), POST/PATCH/DELETE (middleware requireStaff: аноним→401, не admin/moderator→403, через authx.FromForwardedHeaders); ошибки→RFC 7807 (slug_conflict 409, parent_not_found 422, has_children 409, category_not_found 404). Redis-кеш готового JSON-ответа (TTL 1ч, инвалидация при любой записи). main: миграции при старте + otel + pgx + redis + NATS/relay. Dockerfile distroless, compose (deps postgres/pgbouncer/redis/nats) + dev-порт 8083 + scrape-job. Тесты: unit (domain BuildTree; app cache-hit/miss+level/path+события+инвалидация; transport дерево/роли 401-403-201/валидация/маппинг ошибок) + integration на testcontainers postgres (CRUD, slug-conflict, delete-with-children, outbox=4 события) — go test -tags=integration PASS (7.0s); golangci-lint 0 issues (default+integration). Живая проверка: создание root(level0,path=slug)+child(level1,path=parent/slug), дерево вложенное через gateway; запись без auth через gateway→401, user→403, admin/moderator→201; кеш catalog:tree warm→invalidate-on-write→repopulate; slug-конфликт 409, delete-with-children 409, leaf 204, unknown 404; bozor.category.* published=t (relay→NATS, стрим растёт); Prometheus up{job=catalog}=1"
   - stage_id: "2.1"
     title: "Location-сервис + сид регионов/городов Узбекистана"
     completed_date: "2026-07-08"
     evidence: "services/location (модуль bozor/services/location в go.work). Миграции: 00001 схема (regions: id smallint PK, slug UNIQUE, name_uz/name_ru, lat/lon, sort_order; cities: id PK, region_id FK ON DELETE CASCADE, slug UNIQUE, имена/гео/sort, индекс по region_id,sort_order) + 00002 идемпотентный сид (ADR-007, ON CONFLICT DO UPDATE): 14 первичных регионов (12 областей + г.Ташкент + Респ. Каракалпакстан) и 56 городов/районов с реальными координатами WGS84 — включая 12 районов Ташкента и по 2–4 города на регион (апострофы в узбекских названиях экранированы: Farg'ona, Qo'qon, Qoraqalpog'iston и т.д.). Слой: domain (Region/City, lat/lon *float64, ErrRegionNotFound), repo (Regions/CitiesByRegion/RegionExists через pgx, ORDER BY sort_order), app (Service; Cities → 404 при несуществующем регионе, пустой список = регион без городов), transport (chi + middleware pkg/shared, GET /api/v1/locations/regions, GET /api/v1/locations/regions/{id}/cities; 422 на нечисловой id). Config: только DSN (app→PgBouncer, migrate→Postgres напрямую, ADR-013). Миграции при старте через pkg/shared/migrate. Dockerfile build-local go.work → distroless nonroot, healthcheck /location -health. Compose: сервис location + dev-порт 8082 + scrape-job prometheus. Тесты: unit (config DSN, transport regions/cities/404/422/not-found) + integration на testcontainers postgres (14 регионов, 56 городов, 12 районов Ташкента, апостроф Farg'ona, RegionExists, пустой список для чужого региона) — go test -tags=integration PASS (6.7s); golangci-lint 0 issues (default+integration). Живая проверка (15 контейнеров): миграции applied=2, рестарт→applied=0 (идемпотентно); /readyz ready; напрямую и через gateway (routing /api/v1/locations→location): 14 регионов (первый — г.Ташкент), 12 районов Ташкента, апостроф Farg'ona корректен, Самарканд/Каттакурган/Ургут; 404 неизвестный регион, 422 нечисловой id; Prometheus up{job=location}=1"
 
 next_actions:
-  - "Stage 2.2 (Catalog): Catalog-сервис, модель дерева categories (parent_id, slug, name_uz/ru, level, path/materialized path), CRUD под ролью admin/moderator (через forwarded-identity gateway + RequireRole), агрессивный кеш Redis с инвалидацией по событию"
-  - "Далее 2.3–2.4: атрибуты категорий (type enum/int/decimal/bool/string, is_required/filterable, options, наследование вниз по дереву; сид 12 разделов OLX.uz), публичные API дерева/атрибутов/регионов + кеширование"
+  - "Stage 2.3 (Catalog): атрибуты категорий — attributes (type enum/int/decimal/bool/string, is_required, is_filterable, options), связка category_attributes с наследованием вниз по дереву; сид 12 разделов OLX.uz + атрибуты для Недвижимости/Транспорта/Электроники"
+  - "Stage 2.4: публичные API + кеширование — GET /categories/{id}/attributes (эффективные, с учётом наследования), кеширование ответов; завершение CHAPTER 2"
 
 decisions:                         # краткие ссылки; полные ADR — в DECISIONS.md
   - decision: "Брокер — NATS JetStream (не Kafka) ради лёгкости на Compose"
@@ -111,10 +115,10 @@ tech_stack:
   deploy: ["Docker Compose", "nginx"]
 
 metrics:
-  completed_stages: 12
+  completed_stages: 13
   total_stages: 52
-  completion_percentage: 23
-  estimated_remaining_stages: 40
+  completion_percentage: 25
+  estimated_remaining_stages: 39
   chapters_completed: ["0", "1"]   # CHAPTER 0 (Foundations), CHAPTER 1 (Auth & Identity) завершены
 
 notes: "Backend-only, фронтенда нет. Целевая нагрузка: десятки тысяч DAU. Автономный режим работы подтверждён заказчиком. Коммиты — от имени baxromsafarov. Окружение: Windows 11, Go 1.26.4, Docker Desktop 29.2.1 + Compose v5, golangci-lint 2.12.2, goose, buf. Нюанс: локально go test без -race (нет cgo на Windows); -race выполняется в CI на Ubuntu. goconst min-occurrences=5. Инфра-нюансы (Stage 0.3): postgres:18 монтирует /var/lib/postgresql (не .../data); healthcheck typesense — через bash /dev/tcp (нет curl/wget/nc в образе). Локальный .env создаётся из .env.example (gitignore)."

@@ -3,6 +3,7 @@ go 1.26
 use (
 	./pkg/shared
 	./services/auth
+	./services/catalog
 	./services/gateway
 	./services/location
 )
