@@ -34,6 +34,9 @@ services:
   catalog:
     ports:
       - "127.0.0.1:8083:8080"   # прямой доступ к catalog (dev)
+  media:
+    ports:
+      - "127.0.0.1:8084:8080"   # прямой доступ к media (dev)
   grafana:
     ports:
       - "127.0.0.1:3000:3000"   # UI Grafana

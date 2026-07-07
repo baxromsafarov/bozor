@@ -6,4 +6,5 @@ use (
 	./services/catalog
 	./services/gateway
 	./services/location
+	./services/media
 )

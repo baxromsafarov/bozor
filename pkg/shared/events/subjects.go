@@ -29,6 +29,11 @@ const (
 	SubjectCategoryUpdated = "bozor.category.updated"
 	SubjectCategoryDeleted = "bozor.category.deleted"
 
+	// Медиа.
+	SubjectMediaUploaded  = "bozor.media.uploaded"  // оригинал загружен (→ воркер обработки)
+	SubjectMediaProcessed = "bozor.media.processed" // превью готовы (воркер, 3.2)
+	SubjectMediaDeleted   = "bozor.media.deleted"   // объект удалён/осиротел
+
 	// Чат.
 	SubjectChatMessageSent = "bozor.chat.message_sent"
 

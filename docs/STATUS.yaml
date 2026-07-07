@@ -1,11 +1,31 @@
-status_id: "20260710-093000"
+status_id: "20260710-190000"
 project: "Bozor"
 version: "1.0"
 
 current:
   chapter: "3"                     # CHAPTER 3: Listings & Media
   stage: "3.1"                     # STAGE 3.1: Media-сервис — загрузка (POST /media, MinIO, таблица media)
-  status: "not_started"
+  status: "in_progress"
+  wip:                             # чекпоинт на 2026-07-08 — продолжить отсюда
+    done:
+      - "Модуль services/media (bozor/services/media) добавлен в go.work; go.mod (go 1.26), зависимости minio-go/v7 + pgx + chi + uuid подтянуты (go mod tidy)"
+      - "Новые subjects в pkg/shared/events: bozor.media.uploaded/processed/deleted"
+      - "Миграция 00001_init_media: таблица media (id, owner_user_id, ad_id NULL, bucket, object_key UNIQUE, mime_type, size_bytes CHECK>0, status CHECK uploaded/ready/orphan, width/height NULL, created_at; индексы idx_media_ad partial, idx_media_owner) + outbox (DDL синхр. с pkg/shared/outbox)"
+      - "domain: Media, Status, Limits, AllowedTypes (jpeg/png/webp), ExtFor, ValidateUpload (пустой/тип/размер); sentinel ErrMediaNotFound/EmptyFile/FileTooLarge/UnsupportedType/AdMediaLimit/MissingOwner"
+      - "storage/minio.go: Store поверх minio-go (New, EnsureBucket идемпотентно, Put, Remove, PublicURL, Ping для readyz)"
+      - "repo: InsertWithEvent (pgxx.WithTx + outbox), GetByID, CountByAd (лимит на объявление)"
+      - "app.Service.Upload: проверка владельца, ValidateUpload, лимит на ad_id, UUIDv7 → object_key originals/<id>.<ext>, Put→InsertWithEvent, компенсация (blob.Remove) при сбое вставки; событие bozor.media.uploaded (без PII); Get с публичным URL"
+      - "transport: POST /api/v1/media (multipart, MaxBytesReader, sniff типа через http.DetectContentType — НЕ доверяя клиенту, owner из forwarded-идентичности→401 если аноним), GET /api/v1/media/{id}; writeMediaError→RFC 7807; router с middleware pkg/shared + health/ready/metrics"
+      - "cmd/server/main.go (миграции+otel+metrics+pgx+MinIO EnsureBucket+NATS/relay+wiring), Dockerfile (build-local go.work → distroless)"
+      - "compose: сервис media (deps postgres/pgbouncer/minio/nats healthy, tempo started) + override dev-порт 8084 + prometheus scrape-job media"
+      - "Тесты: unit domain (ValidateUpload таблицей, ExtFor) + app (Upload happy/owner/type/size/ad-limit/компенсация, Get) — go test PASS; golangci-lint 0 issues; gofmt чисто"
+      - "Gateway уже маршрутизирует /api/v1/media→media (routes.go, из 0.4)"
+    remaining:
+      - "Тесты transport/media_test.go: 401 аноним, 422 нет файла/неподдерж.тип(sniff PDF)/too-large, 409 ad_media_limit, 201 happy (multipart), Get 200/404 (использовать httptest + multipart.Writer, PNG-магию \\x89PNG для валидного sniff)"
+      - "Интеграционный тест repo (build-tag integration, testcontainers postgres:18): InsertWithEvent+GetByID+CountByAd+outbox count; опц. MinIO через testcontainers для storage"
+      - "go work sync и проверка, что все модули собираются/тесты зелёные (default+integration)"
+      - "Живая проверка: docker compose build media + up; upload реальной картинки через gateway → 201 {id,url,mime,size,status,created_at}; объект в MinIO (mc ls/HTTP GET по url); строка в media; событие bozor.media.uploaded в outbox→relay→NATS (стрим BOZOR растёт); аноним→401; PDF/битый тип→422 unsupported_type; >10MiB→422 file_too_large; лимит на ad_id (11-я картинка→409)"
+      - "Завершить стадию: STATUS.yaml (3.1 completed, metrics 16/52), DECISIONS при необходимости (ADR по хранению медиа/object-key/публичным URL — если решение нетривиально), commit + push"
 
 completed:
   - stage_id: "0.1"
