@@ -4,4 +4,5 @@ use (
 	./pkg/shared
 	./services/auth
 	./services/gateway
+	./services/location
 )

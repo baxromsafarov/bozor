@@ -23,6 +23,11 @@ scrape_configs:
     static_configs:
       - targets: ["auth:8080"]
 
+  - job_name: location
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["location:8080"]
+
   - job_name: tempo
     static_configs:
       - targets: ["tempo:3200"]

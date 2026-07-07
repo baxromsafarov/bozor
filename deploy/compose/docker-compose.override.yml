@@ -28,6 +28,9 @@ services:
   auth:
     ports:
       - "127.0.0.1:8081:8080"   # прямой доступ к auth (dev)
+  location:
+    ports:
+      - "127.0.0.1:8082:8080"   # прямой доступ к location (dev)
   grafana:
     ports:
       - "127.0.0.1:3000:3000"   # UI Grafana
