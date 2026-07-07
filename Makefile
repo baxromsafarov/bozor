@@ -12,7 +12,7 @@ COMPOSE_BASE = docker compose -f deploy/compose/docker-compose.yml
 COMPOSE_DEV  = $(COMPOSE_BASE) -f deploy/compose/docker-compose.override.yml --env-file .env
 COMPOSE_PROD = $(COMPOSE_BASE) -f deploy/compose/docker-compose.prod.yml --env-file .env
 
-.PHONY: all lint test build tidy fmt gen up up-prod down down-prod ps logs migrate seed help
+.PHONY: all lint test test-integration build tidy fmt gen up up-prod down down-prod ps logs migrate seed help
 
 all: lint test build
 
@@ -28,6 +28,13 @@ test:
 	@for dir in $(MODULES); do \
 		echo "== test $$dir"; \
 		(cd $$dir && go test -race -count=1 ./...) || exit 1; \
+	done
+
+## test-integration: интеграционные тесты (testcontainers, требуется Docker)
+test-integration:
+	@for dir in $(MODULES); do \
+		echo "== test-integration $$dir"; \
+		(cd $$dir && go test -tags=integration -count=1 ./...) || exit 1; \
 	done
 
 ## build: сборка всех модулей workspace

@@ -1,10 +1,10 @@
-status_id: "20260707-020000"
+status_id: "20260708-010000"
 project: "Bozor"
 version: "1.0"
 
 current:
-  chapter: "0"                     # CHAPTER 0: Foundations & Platform
-  stage: "0.6"                     # STAGE 0.6: Фреймворк миграций goose (forward-only) + сиды
+  chapter: "1"                     # CHAPTER 1: Auth & Identity (Telegram bot phone-auth)
+  stage: "1.1"                     # STAGE 1.1: Настройка Telegram-бота + скелет Auth-сервиса
   status: "not_started"
 
 completed:
@@ -28,10 +28,14 @@ completed:
     title: "Стек наблюдаемости: Tempo, Loki, Alloy, Prometheus, Grafana"
     completed_date: "2026-07-07"
     evidence: "deploy/observability/* + 5 сервисов в compose (ADR-015). Трейсы: gateway → OTLP → Tempo (проверено: tempo_distributor_spans_received_total>1200, поиск трасс по service.name=gateway). Метрики: новый otelx.SetupMetrics (OTel MeterProvider + Prometheus-экспортёр) → otelhttp пишет RED автоматически; /metrics на gateway; Prometheus scrape (job gateway up, http_server_request_duration_seconds с http_route/status, p95 считается). Логи: JSON stdout → Alloy (docker discovery, извлечение level/service/trace_id) → Loki (проверено: label svc=gateway). Grafana: provision источников (Prometheus/Loki/Tempo, derived field trace_id→Tempo) + 2 дашборда (Gateway RED, Infra Health/USE) — проверен end-to-end запрос через datasource proxy. Алерты: правила TargetDown/GatewayHighErrorRate/GatewayHighLatencyP95 в Prometheus. Живая проверка: 13/13 контейнеров healthy; go test + golangci-lint 0 issues (оба модуля). Alertmanager и cadvisor/node-exporter — отложены (в ADR-015)"
+  - stage_id: "0.6"
+    title: "Фреймворк миграций goose (forward-only) + сиды — CHAPTER 0 завершён"
+    completed_date: "2026-07-08"
+    evidence: "pkg/shared/migrate: Up(ctx, dsn, fs.FS) поверх goose v3 provider API (forward-only, только Up) с сессионным advisory-lock Postgres (goose.WithSessionLocker) для сериализации реплик; sql-драйвер pgx stdlib. Сиды = идемпотентные миграции (INSERT ... ON CONFLICT DO NOTHING), ADR-007. Godoc-пример подключения в сервисе + предупреждение: DSN напрямую к postgres:5432, НЕ через PgBouncer (сессионный лок несовместим с transaction-пулингом — ADR-013). Тесты: unit (bad/unparsable DSN) + integration на testcontainers-go (реальный postgres:18) — прогон с нуля (2 миграции), проверка сида (2 строки), идемпотентность повтора (0, без дублей), build-tag integration; go test -tags=integration PASS (8.9s). Makefile: цель test-integration. golangci-lint 0 issues (default и integration build)"
 
 next_actions:
-  - "Stage 0.6: фреймворк миграций goose (forward-only) — pkg/shared хелпер запуска миграций при старте (advisory-lock), структура services/<svc>/migrations, механизм сидов"
-  - "Далее Stage 0.7+ по ROADMAP (завершение CHAPTER 0)"
+  - "Stage 1.1 (CHAPTER 1): Telegram-бот (webhook + secret token X-Telegram-Bot-Api-Secret-Token) + скелет Auth-сервиса; БД users (+ refresh_tokens, auth_audit_log), первые goose-миграции сервиса"
+  - "Далее 1.2–1.5: phone-auth flow (nonce/deep-link, request_contact), выпуск/ротация JWT (ADR-012), reuse-detection"
 
 decisions:                         # краткие ссылки; полные ADR — в DECISIONS.md
   - decision: "Брокер — NATS JetStream (не Kafka) ради лёгкости на Compose"
@@ -82,9 +86,10 @@ tech_stack:
   deploy: ["Docker Compose", "nginx"]
 
 metrics:
-  completed_stages: 5
+  completed_stages: 6
   total_stages: 52
-  completion_percentage: 10
-  estimated_remaining_stages: 47
+  completion_percentage: 12
+  estimated_remaining_stages: 46
+  chapters_completed: ["0"]        # CHAPTER 0 (Foundations & Platform) завершён
 
 notes: "Backend-only, фронтенда нет. Целевая нагрузка: десятки тысяч DAU. Автономный режим работы подтверждён заказчиком. Коммиты — от имени baxromsafarov. Окружение: Windows 11, Go 1.26.4, Docker Desktop 29.2.1 + Compose v5, golangci-lint 2.12.2, goose, buf. Нюанс: локально go test без -race (нет cgo на Windows); -race выполняется в CI на Ubuntu. goconst min-occurrences=5. Инфра-нюансы (Stage 0.3): postgres:18 монтирует /var/lib/postgresql (не .../data); healthcheck typesense — через bash /dev/tcp (нет curl/wget/nc в образе). Локальный .env создаётся из .env.example (gitignore)."
