@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -18,7 +19,7 @@ type fakeAttrService struct {
 	list        []domain.Attribute
 	created     domain.Attribute
 	createErr   error
-	effective   []domain.EffectiveAttribute
+	effBody     []byte
 	effErr      error
 	linkErr     error
 	gotCreate   app.CreateAttributeInput
@@ -45,8 +46,14 @@ func (f *fakeAttrService) Update(_ context.Context, id string, _ app.UpdateAttri
 
 func (f *fakeAttrService) Delete(context.Context, string) error { return nil }
 
-func (f *fakeAttrService) Effective(context.Context, string) ([]domain.EffectiveAttribute, error) {
-	return f.effective, f.effErr
+func (f *fakeAttrService) EffectiveJSON(context.Context, string) ([]byte, error) {
+	if f.effErr != nil {
+		return nil, f.effErr
+	}
+	if f.effBody == nil {
+		return []byte(`{"attributes":[]}`), nil
+	}
+	return f.effBody, nil
 }
 
 func (f *fakeAttrService) Link(_ context.Context, _, attributeID string, _ int) error {
@@ -65,13 +72,13 @@ func newAttrRouter(svc AttributeService) http.Handler {
 }
 
 func TestCategoryAttributes_Public(t *testing.T) {
-	unit := "km"
-	svc := &fakeAttrService{effective: []domain.EffectiveAttribute{
-		{Attribute: domain.Attribute{ID: "a1", Slug: "brand", NameUZ: "Marka", NameRU: "Марка", Type: domain.TypeEnum}, Inherited: true, SortOrder: 1, SourceID: "root"},
-		{Attribute: domain.Attribute{ID: "a2", Slug: "mileage", NameUZ: "Probeg", NameRU: "Пробег", Type: domain.TypeInt, Unit: &unit}, SourceID: "self"},
-	}}
+	body := []byte(`{"attributes":[{"slug":"brand","inherited":true},{"slug":"mileage","inherited":false}]}`)
+	svc := &fakeAttrService{effBody: body}
 	rec := do(t, newAttrRouter(svc), http.MethodGet, "/api/v1/categories/cat1/attributes", "", "")
 	require.Equal(t, http.StatusOK, rec.Code)
+	assert.Contains(t, rec.Header().Get("Content-Type"), "application/json")
+	assert.NotEmpty(t, rec.Header().Get("ETag"), "публичный ответ отдаёт ETag")
+	assert.Contains(t, rec.Header().Get("Cache-Control"), "max-age")
 
 	var resp struct {
 		Attributes []map[string]any `json:"attributes"`
@@ -80,6 +87,24 @@ func TestCategoryAttributes_Public(t *testing.T) {
 	require.Len(t, resp.Attributes, 2)
 	assert.Equal(t, true, resp.Attributes[0]["inherited"])
 	assert.Equal(t, "brand", resp.Attributes[0]["slug"])
+}
+
+func TestCategoryAttributes_ETagNotModified(t *testing.T) {
+	svc := &fakeAttrService{effBody: []byte(`{"attributes":[{"slug":"brand"}]}`)}
+	router := newAttrRouter(svc)
+
+	first := do(t, router, http.MethodGet, "/api/v1/categories/cat1/attributes", "", "")
+	require.Equal(t, http.StatusOK, first.Code)
+	etag := first.Header().Get("ETag")
+	require.NotEmpty(t, etag)
+
+	// Повторный запрос с If-None-Match → 304 без тела.
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/categories/cat1/attributes", nil)
+	req.Header.Set("If-None-Match", etag)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	assert.Equal(t, http.StatusNotModified, rec.Code)
+	assert.Empty(t, rec.Body.String(), "304 без тела")
 }
 
 func TestCategoryAttributes_CategoryNotFound(t *testing.T) {

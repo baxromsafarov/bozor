@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -28,16 +29,24 @@ type CategoryLookup interface {
 	GetByID(ctx context.Context, id string) (domain.Category, error)
 }
 
+// AttrCache — кеш ответов эффективных атрибутов (реализуется cache.AttrCache).
+type AttrCache interface {
+	Get(ctx context.Context, categoryID string) ([]byte, error)
+	Set(ctx context.Context, categoryID string, data []byte) error
+	Invalidate(ctx context.Context) error
+}
+
 // AttributeService — use-cases атрибутов каталога.
 type AttributeService struct {
 	attrs AttributeStore
 	cats  CategoryLookup
+	cache AttrCache
 	log   *slog.Logger
 }
 
 // NewAttributeService создаёт сервис атрибутов.
-func NewAttributeService(attrs AttributeStore, cats CategoryLookup, log *slog.Logger) *AttributeService {
-	return &AttributeService{attrs: attrs, cats: cats, log: log}
+func NewAttributeService(attrs AttributeStore, cats CategoryLookup, cache AttrCache, log *slog.Logger) *AttributeService {
+	return &AttributeService{attrs: attrs, cats: cats, cache: cache, log: log}
 }
 
 // List возвращает все определения атрибутов.
@@ -130,12 +139,17 @@ func (s *AttributeService) Update(ctx context.Context, id string, in UpdateAttri
 	if err := s.attrs.UpdateAttribute(ctx, cur); err != nil {
 		return domain.Attribute{}, err
 	}
+	s.invalidate(ctx) // данные атрибута изменились везде, где он привязан
 	return cur, nil
 }
 
 // Delete удаляет атрибут (варианты и привязки уходят каскадом).
 func (s *AttributeService) Delete(ctx context.Context, id string) error {
-	return s.attrs.DeleteAttribute(ctx, id)
+	if err := s.attrs.DeleteAttribute(ctx, id); err != nil {
+		return err
+	}
+	s.invalidate(ctx)
+	return nil
 }
 
 // Effective возвращает эффективные атрибуты категории (собственные + унаследованные).
@@ -146,6 +160,32 @@ func (s *AttributeService) Effective(ctx context.Context, categoryID string) ([]
 	return s.attrs.EffectiveAttributes(ctx, categoryID)
 }
 
+// EffectiveJSON возвращает готовый JSON-ответ эффективных атрибутов из кеша или
+// из БД (с последующим кешированием). Кешируется тело ответа по категории.
+func (s *AttributeService) EffectiveJSON(ctx context.Context, categoryID string) ([]byte, error) {
+	if _, err := s.cats.GetByID(ctx, categoryID); err != nil {
+		return nil, err
+	}
+	if data, err := s.cache.Get(ctx, categoryID); err != nil {
+		s.log.WarnContext(ctx, "кеш атрибутов недоступен", slog.String("error", err.Error()))
+	} else if data != nil {
+		return data, nil
+	}
+
+	items, err := s.attrs.EffectiveAttributes(ctx, categoryID)
+	if err != nil {
+		return nil, err
+	}
+	body, err := json.Marshal(map[string]any{"attributes": toEffectiveViews(items)})
+	if err != nil {
+		return nil, fmt.Errorf("app: сериализация атрибутов: %w", err)
+	}
+	if err := s.cache.Set(ctx, categoryID, body); err != nil {
+		s.log.WarnContext(ctx, "не удалось закешировать атрибуты", slog.String("error", err.Error()))
+	}
+	return body, nil
+}
+
 // Link привязывает атрибут к категории (обе сущности должны существовать).
 func (s *AttributeService) Link(ctx context.Context, categoryID, attributeID string, sortOrder int) error {
 	if _, err := s.cats.GetByID(ctx, categoryID); err != nil {
@@ -154,12 +194,27 @@ func (s *AttributeService) Link(ctx context.Context, categoryID, attributeID str
 	if _, err := s.attrs.GetAttribute(ctx, attributeID); err != nil {
 		return err
 	}
-	return s.attrs.LinkAttribute(ctx, categoryID, attributeID, sortOrder)
+	if err := s.attrs.LinkAttribute(ctx, categoryID, attributeID, sortOrder); err != nil {
+		return err
+	}
+	s.invalidate(ctx)
+	return nil
 }
 
 // Unlink снимает привязку атрибута с категории.
 func (s *AttributeService) Unlink(ctx context.Context, categoryID, attributeID string) error {
-	return s.attrs.UnlinkAttribute(ctx, categoryID, attributeID)
+	if err := s.attrs.UnlinkAttribute(ctx, categoryID, attributeID); err != nil {
+		return err
+	}
+	s.invalidate(ctx)
+	return nil
+}
+
+// invalidate сбрасывает кеш эффективных атрибутов (best-effort).
+func (s *AttributeService) invalidate(ctx context.Context) {
+	if err := s.cache.Invalidate(ctx); err != nil {
+		s.log.WarnContext(ctx, "не удалось инвалидировать кеш атрибутов", slog.String("error", err.Error()))
+	}
 }
 
 // validateOptions проверяет соответствие набора вариантов типу атрибута.

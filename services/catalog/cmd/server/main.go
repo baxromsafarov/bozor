@@ -39,6 +39,9 @@ const serviceName = "catalog"
 // treeCacheTTL — время жизни кеша дерева категорий (инвалидируется при записи).
 const treeCacheTTL = time.Hour
 
+// attrCacheTTL — время жизни кеша эффективных атрибутов (сбрасывается по поколению).
+const attrCacheTTL = time.Hour
+
 func main() {
 	healthcheck := flag.Bool("health", false, "выполнить self health-check по /healthz и выйти")
 	flag.Parse()
@@ -119,7 +122,7 @@ func run() error {
 	catalogRepo := repo.NewRepo(pool)
 	svc := app.NewService(catalogRepo, cache.NewTreeCache(rdb, treeCacheTTL), log)
 	handler := transport.NewHandler(svc, log)
-	attrSvc := app.NewAttributeService(catalogRepo, catalogRepo, log)
+	attrSvc := app.NewAttributeService(catalogRepo, catalogRepo, cache.NewAttrCache(rdb, attrCacheTTL), log)
 	attrHandler := transport.NewAttributeHandler(attrSvc, log)
 
 	router := transport.NewRouter(transport.Deps{

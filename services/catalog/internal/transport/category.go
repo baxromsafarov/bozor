@@ -36,7 +36,8 @@ func NewHandler(svc Service, log *slog.Logger) *Handler {
 	return &Handler{svc: svc, log: log}
 }
 
-// Tree отдаёт дерево категорий (публично, из кеша). Тело уже сериализовано.
+// Tree отдаёт дерево категорий (публично, из кеша). Тело уже сериализовано;
+// добавляем ETag/Cache-Control для условных запросов.
 func (h *Handler) Tree(w http.ResponseWriter, r *http.Request) {
 	body, err := h.svc.TreeJSON(r.Context())
 	if err != nil {
@@ -45,9 +46,7 @@ func (h *Handler) Tree(w http.ResponseWriter, r *http.Request) {
 			"Не удалось получить категории", "Kategoriyalarni olib bo'lmadi"))
 		return
 	}
-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(body)
+	writeCachedJSON(w, r, body)
 }
 
 type createRequest struct {

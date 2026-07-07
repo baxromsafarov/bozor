@@ -19,6 +19,7 @@ type fakeAttrStore struct {
 	linkCalled bool
 	linkArgs   [3]string
 	effective  []domain.EffectiveAttribute
+	effCalls   int
 }
 
 func (f *fakeAttrStore) ListAttributes(context.Context) ([]domain.Attribute, error) {
@@ -53,6 +54,7 @@ func (f *fakeAttrStore) DeleteAttribute(_ context.Context, id string) error {
 }
 
 func (f *fakeAttrStore) EffectiveAttributes(context.Context, string) ([]domain.EffectiveAttribute, error) {
+	f.effCalls++
 	return f.effective, nil
 }
 
@@ -77,8 +79,28 @@ func (f *fakeCategoryLookup) GetByID(_ context.Context, id string) (domain.Categ
 	return c, nil
 }
 
+type fakeAttrCache struct {
+	data        map[string][]byte
+	setCount    int
+	invalidated int
+}
+
+func newFakeAttrCache() *fakeAttrCache { return &fakeAttrCache{data: map[string][]byte{}} }
+
+func (f *fakeAttrCache) Get(_ context.Context, id string) ([]byte, error) { return f.data[id], nil }
+func (f *fakeAttrCache) Set(_ context.Context, id string, d []byte) error {
+	f.data[id] = d
+	f.setCount++
+	return nil
+}
+func (f *fakeAttrCache) Invalidate(context.Context) error {
+	f.data = map[string][]byte{}
+	f.invalidated++
+	return nil
+}
+
 func newAttrSvc(store *fakeAttrStore, cats *fakeCategoryLookup) *AttributeService {
-	return NewAttributeService(store, cats, discardLogger())
+	return NewAttributeService(store, cats, newFakeAttrCache(), discardLogger())
 }
 
 func TestCreateAttribute_InvalidType(t *testing.T) {
@@ -182,4 +204,57 @@ func TestUpdateAttribute_NotFound(t *testing.T) {
 	_, err := newAttrSvc(&fakeAttrStore{byID: map[string]domain.Attribute{}}, &fakeCategoryLookup{}).
 		Update(context.Background(), "nope", UpdateAttributeInput{NameUZ: "X", NameRU: "X"})
 	assert.True(t, errors.Is(err, domain.ErrAttributeNotFound))
+}
+
+func TestEffectiveJSON_CacheMissThenHit(t *testing.T) {
+	cats := &fakeCategoryLookup{exists: map[string]domain.Category{"c1": {ID: "c1"}}}
+	store := &fakeAttrStore{effective: []domain.EffectiveAttribute{
+		{Attribute: domain.Attribute{ID: "a1", Slug: "brand", Type: domain.TypeEnum}, Inherited: true, SourceID: "root"},
+	}}
+	c := newFakeAttrCache()
+	svc := NewAttributeService(store, cats, c, discardLogger())
+
+	// Промах: считаем из БД, кешируем.
+	body, err := svc.EffectiveJSON(context.Background(), "c1")
+	require.NoError(t, err)
+	assert.Contains(t, string(body), `"brand"`)
+	assert.Contains(t, string(body), `"inherited":true`)
+	assert.Equal(t, 1, store.effCalls)
+	assert.Equal(t, 1, c.setCount)
+
+	// Попадание: БД не трогаем.
+	body2, err := svc.EffectiveJSON(context.Background(), "c1")
+	require.NoError(t, err)
+	assert.Equal(t, body, body2)
+	assert.Equal(t, 1, store.effCalls, "второй раз читаем из кеша")
+}
+
+func TestEffectiveJSON_CategoryNotFound(t *testing.T) {
+	c := newFakeAttrCache()
+	svc := NewAttributeService(&fakeAttrStore{}, &fakeCategoryLookup{}, c, discardLogger())
+	_, err := svc.EffectiveJSON(context.Background(), "missing")
+	assert.ErrorIs(t, err, domain.ErrCategoryNotFound)
+	assert.Equal(t, 0, c.setCount, "для несуществующей категории кеш не пишется")
+}
+
+func TestMutations_InvalidateCache(t *testing.T) {
+	cats := &fakeCategoryLookup{exists: map[string]domain.Category{"c1": {ID: "c1"}}}
+	store := &fakeAttrStore{byID: map[string]domain.Attribute{
+		"a1": {ID: "a1", Slug: "brand", Type: domain.TypeString},
+	}}
+	c := newFakeAttrCache()
+	svc := NewAttributeService(store, cats, c, discardLogger())
+
+	require.NoError(t, svc.Link(context.Background(), "c1", "a1", 0))
+	assert.Equal(t, 1, c.invalidated, "link сбрасывает кеш")
+
+	require.NoError(t, svc.Unlink(context.Background(), "c1", "a1"))
+	assert.Equal(t, 2, c.invalidated, "unlink сбрасывает кеш")
+
+	_, err := svc.Update(context.Background(), "a1", UpdateAttributeInput{NameUZ: "X", NameRU: "X"})
+	require.NoError(t, err)
+	assert.Equal(t, 3, c.invalidated, "update сбрасывает кеш")
+
+	require.NoError(t, svc.Delete(context.Background(), "a1"))
+	assert.Equal(t, 4, c.invalidated, "delete сбрасывает кеш")
 }

@@ -21,7 +21,7 @@ type AttributeService interface {
 	Create(ctx context.Context, in app.CreateAttributeInput) (domain.Attribute, error)
 	Update(ctx context.Context, id string, in app.UpdateAttributeInput) (domain.Attribute, error)
 	Delete(ctx context.Context, id string) error
-	Effective(ctx context.Context, categoryID string) ([]domain.EffectiveAttribute, error)
+	EffectiveJSON(ctx context.Context, categoryID string) ([]byte, error)
 	Link(ctx context.Context, categoryID, attributeID string, sortOrder int) error
 	Unlink(ctx context.Context, categoryID, attributeID string) error
 }
@@ -62,13 +62,6 @@ type optionResponse struct {
 	NameUZ    string `json:"name_uz"`
 	NameRU    string `json:"name_ru"`
 	SortOrder int    `json:"sort_order"`
-}
-
-type effectiveAttributeResponse struct {
-	attributeResponse
-	Inherited bool   `json:"inherited"`
-	SortOrder int    `json:"sort_order"`
-	SourceID  string `json:"source_id"`
 }
 
 // List отдаёт все определения атрибутов (публично).
@@ -175,23 +168,15 @@ func (h *AttributeHandler) Delete(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// CategoryAttributes отдаёт эффективные атрибуты категории (публично).
+// CategoryAttributes отдаёт эффективные атрибуты категории (публично, из кеша).
+// Тело уже сериализовано сервисом; добавляем ETag/Cache-Control.
 func (h *AttributeHandler) CategoryAttributes(w http.ResponseWriter, r *http.Request) {
-	items, err := h.svc.Effective(r.Context(), chi.URLParam(r, "id"))
+	body, err := h.svc.EffectiveJSON(r.Context(), chi.URLParam(r, "id"))
 	if err != nil {
 		writeCatalogError(w, r, h.log, err)
 		return
 	}
-	out := make([]effectiveAttributeResponse, 0, len(items))
-	for _, e := range items {
-		out = append(out, effectiveAttributeResponse{
-			attributeResponse: toAttributeResponse(e.Attribute),
-			Inherited:         e.Inherited,
-			SortOrder:         e.SortOrder,
-			SourceID:          e.SourceID,
-		})
-	}
-	httpx.Respond(w, http.StatusOK, map[string]any{"attributes": out})
+	writeCachedJSON(w, r, body)
 }
 
 type linkRequest struct {
