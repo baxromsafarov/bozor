@@ -1,11 +1,11 @@
-status_id: "20260706-220030"
+status_id: "20260707-000000"
 project: "Bozor"
 version: "1.0"
 
 current:
   chapter: "0"                     # CHAPTER 0: Foundations & Platform
-  stage: "0.3"                     # STAGE 0.3: Скелет docker-compose инфраструктуры
-  status: "in_progress"
+  stage: "0.4"                     # STAGE 0.4: API Gateway (nginx → gateway на chi)
+  status: "not_started"
 
 completed:
   - stage_id: "0.1"
@@ -16,25 +16,15 @@ completed:
     title: "Общие библиотеки /pkg/shared"
     completed_date: "2026-07-06"
     evidence: "11 пакетов: config, logging (slog JSON + trace/request id), apperr (RFC 7807, uz/ru), events (envelope CloudEvents-lite + 18 subjects + DLQ), httpx (request-id/recover/access-log/lang, DecodeJSON, WriteProblem, health/ready, graceful Serve), otelx (OTLP gRPC + пропагаторы), grpcx (otel + recovery), pgxx (пул + WithTx), natsx (JetStream publish/consume, дедуп по Nats-Msg-Id, Nak/DLQ), authx (JWT HS256, ротация — на уровне auth-сервиса; middleware Auth/RequireRole/FromForwardedHeaders), outbox (Enqueue + Relay SKIP LOCKED + inbox-идемпотентность). go test: 10 пакетов ok; golangci-lint: 0 issues; go mod tidy применён"
-
-in_progress:
-  stage_id: "0.3"
-  title: "Скелет docker-compose: PostgreSQL+PgBouncer, Redis, NATS, Typesense, MinIO, nginx"
-  progress_percent: 0
-  tasks_completed: 0
-  tasks_total: 5
-  tasks:
-    - "deploy/compose/docker-compose.yml: postgres (+init db-per-service), pgbouncer, redis, nats -js, typesense, minio (+создание бакета), nginx"
-    - "healthcheck'и всех контейнеров, именованные volumes, внутренняя сеть"
-    - "deploy/nginx/nginx.conf: edge с апстримом на будущий gateway"
-    - "docker-compose.override.yml (dev: проброс портов) и заготовка prod-профиля"
-    - "Проверка: docker compose up -d, все контейнеры healthy"
+  - stage_id: "0.3"
+    title: "Скелет docker-compose инфраструктуры платформы"
+    completed_date: "2026-07-07"
+    evidence: "deploy/compose/docker-compose.yml: postgres:18 (init-скрипт создаёт 12 БД по сервисам — проверено, count=12), pgbouncer (transaction + max_prepared_statements=200 для совместимости pgx cache_statement — ADR-013), redis:8 (appendonly=yes, allkeys-lru), nats:2.12 -js (JetStream проверен через /jsz), typesense:29 (healthcheck через bash /dev/tcp — в образе нет curl/wget/nc), minio + minio-init (бакет bozor-media + download policy). Все healthcheck'и, именованные volumes, сеть bozor. nginx.conf: /nginx-health→200, /api/→503 problem+json (gateway ещё нет), /ws для чата, / →404. override (dev: порты на 127.0.0.1) и prod-профиль (наружу только nginx 80/443, restart:always, лимиты логов). Makefile: up/up-prod/down/down-prod через COMPOSE_DEV/PROD (dev тянет override — иначе проброс портов терялся). Проверка: docker compose up -d → 7/7 healthy; nginx-роутинг, PgBouncer через 6432, JetStream, Redis, 12 БД — всё проверено вживую"
 
 next_actions:
-  - "Собрать deploy/compose/docker-compose.yml со всей инфраструктурой"
-  - "Init-скрипт PostgreSQL: 12 БД по сервисам"
-  - "Поднять и проверить healthcheck'и"
-  - "Далее Stage 0.4: API Gateway"
+  - "Stage 0.4: API Gateway на chi — скелет services/gateway (health/ready, middleware-цепочка из pkg/shared, JWT-проверка, проксирование на будущие сервисы)"
+  - "Добавить gateway в docker-compose.yml, nginx апстрим gateway:8080 уже готов"
+  - "Далее Stage 0.5+ по ROADMAP"
 
 decisions:                         # краткие ссылки; полные ADR — в DECISIONS.md
   - decision: "Брокер — NATS JetStream (не Kafka) ради лёгкости на Compose"
@@ -57,6 +47,10 @@ decisions:                         # краткие ссылки; полные A
     rationale: "Динамические фильтры листинга/поиска неудобны в sqlc; меньше codegen-зависимостей"
     date: "2026-07-06"
     alternatives: ["sqlc"]
+  - decision: "Один PostgreSQL-инстанс (БД на сервис) + PgBouncer transaction с max_prepared_statements (ADR-013)"
+    rationale: "PgBouncer >=1.21 держит prepared statements в transaction-режиме → pgx на дефолтном cache_statement без правок; мультиплексирование сохранено"
+    date: "2026-07-07"
+    alternatives: ["pgx simple_protocol/exec", "PgBouncer session-режим", "Инстанс на сервис"]
 
 open_questions: []
 
@@ -73,9 +67,9 @@ tech_stack:
   deploy: ["Docker Compose", "nginx"]
 
 metrics:
-  completed_stages: 2
+  completed_stages: 3
   total_stages: 52
-  completion_percentage: 4
-  estimated_remaining_stages: 50
+  completion_percentage: 6
+  estimated_remaining_stages: 49
 
-notes: "Backend-only, фронтенда нет. Целевая нагрузка: десятки тысяч DAU. Автономный режим работы подтверждён заказчиком. Коммиты — от имени baxromsafarov. Окружение: Windows 11, Go 1.26.4, Docker Desktop, golangci-lint 2.12.2, goose, buf. Нюанс: локально go test без -race (нет cgo на Windows); -race выполняется в CI на Ubuntu. goconst min-occurrences=5."
+notes: "Backend-only, фронтенда нет. Целевая нагрузка: десятки тысяч DAU. Автономный режим работы подтверждён заказчиком. Коммиты — от имени baxromsafarov. Окружение: Windows 11, Go 1.26.4, Docker Desktop 29.2.1 + Compose v5, golangci-lint 2.12.2, goose, buf. Нюанс: локально go test без -race (нет cgo на Windows); -race выполняется в CI на Ubuntu. goconst min-occurrences=5. Инфра-нюансы (Stage 0.3): postgres:18 монтирует /var/lib/postgresql (не .../data); healthcheck typesense — через bash /dev/tcp (нет curl/wget/nc в образе). Локальный .env создаётся из .env.example (gitignore)."

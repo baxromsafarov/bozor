@@ -7,7 +7,12 @@ GOBIN ?= $(shell go env GOPATH)/bin
 # Все модули workspace (go.work)
 MODULES = $(shell go list -m -f '{{.Dir}}')
 
-.PHONY: all lint test build tidy fmt gen up down ps logs migrate seed help
+# Compose-обёртки: dev тянет override (проброс портов), prod — prod-профиль.
+COMPOSE_BASE = docker compose -f deploy/compose/docker-compose.yml
+COMPOSE_DEV  = $(COMPOSE_BASE) -f deploy/compose/docker-compose.override.yml --env-file .env
+COMPOSE_PROD = $(COMPOSE_BASE) -f deploy/compose/docker-compose.prod.yml --env-file .env
+
+.PHONY: all lint test build tidy fmt gen up up-prod down down-prod ps logs migrate seed help
 
 all: lint test build
 
@@ -47,21 +52,29 @@ fmt:
 gen:
 	cd api/proto && buf generate
 
-## up: поднять всю платформу локально
+## up: поднять всю платформу локально (dev: порты проброшены на localhost)
 up:
-	docker compose -f deploy/compose/docker-compose.yml --env-file .env up -d
+	$(COMPOSE_DEV) up -d
 
-## down: остановить платформу
+## up-prod: поднять платформу в прод-профиле (наружу только nginx)
+up-prod:
+	$(COMPOSE_PROD) up -d
+
+## down: остановить платформу (dev)
 down:
-	docker compose -f deploy/compose/docker-compose.yml --env-file .env down
+	$(COMPOSE_DEV) down
+
+## down-prod: остановить платформу (prod)
+down-prod:
+	$(COMPOSE_PROD) down
 
 ## ps: статус контейнеров
 ps:
-	docker compose -f deploy/compose/docker-compose.yml --env-file .env ps
+	$(COMPOSE_DEV) ps
 
 ## logs: логи платформы (все сервисы)
 logs:
-	docker compose -f deploy/compose/docker-compose.yml --env-file .env logs -f --tail=100
+	$(COMPOSE_DEV) logs -f --tail=100
 
 ## help: список целей
 help:

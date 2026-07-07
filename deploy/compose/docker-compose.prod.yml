@@ -1,0 +1,30 @@
+# Прод-профиль: наружу торчит только nginx; рестарты; лимиты логов.
+# Запуск: docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+# TLS-терминация на nginx (сертификаты монтируются в /etc/nginx/certs) — Stage 10.6.
+
+x-prod-defaults: &prod
+  restart: always
+  logging:
+    driver: json-file
+    options:
+      max-size: "50m"
+      max-file: "3"
+
+services:
+  postgres:
+    <<: *prod
+  pgbouncer:
+    <<: *prod
+  redis:
+    <<: *prod
+  nats:
+    <<: *prod
+  typesense:
+    <<: *prod
+  minio:
+    <<: *prod
+  nginx:
+    <<: *prod
+    ports:
+      - "80:80"
+      - "443:443"
