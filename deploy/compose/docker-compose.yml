@@ -278,12 +278,18 @@ services:
       POSTGRES_PORT: ${POSTGRES_PORT}
       PGBOUNCER_HOST: ${PGBOUNCER_HOST}
       PGBOUNCER_PORT: ${PGBOUNCER_PORT}
+      REDIS_ADDR: ${REDIS_ADDR}
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
       TELEGRAM_WEBHOOK_SECRET: ${TELEGRAM_WEBHOOK_SECRET}
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}
+      TELEGRAM_BOT_USERNAME: ${TELEGRAM_BOT_USERNAME}
       OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT}
     depends_on:
       postgres:              # миграции идут напрямую к postgres:5432
         condition: service_healthy
       pgbouncer:             # рантайм-пул — через pgbouncer:6432
+        condition: service_healthy
+      redis:                 # nonce'ы логина (deep-link сессии)
         condition: service_healthy
       nats:                  # publish событий из outbox → JetStream
         condition: service_healthy

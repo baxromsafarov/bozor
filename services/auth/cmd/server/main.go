@@ -15,6 +15,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/redis/go-redis/v9"
+
 	"bozor/pkg/shared/events"
 	"bozor/pkg/shared/httpx"
 	"bozor/pkg/shared/logging"
@@ -27,6 +29,7 @@ import (
 	"bozor/services/auth/internal/app"
 	"bozor/services/auth/internal/config"
 	"bozor/services/auth/internal/repo"
+	"bozor/services/auth/internal/session"
 	"bozor/services/auth/internal/telegram"
 	"bozor/services/auth/internal/transport"
 	"bozor/services/auth/migrations"
@@ -84,6 +87,11 @@ func run() error {
 	}
 	defer pool.Close()
 
+	// Redis: одноразовые nonce'ы логина (deep-link сессии).
+	rdb := redis.NewClient(&redis.Options{Addr: cfg.RedisAddr, Password: cfg.RedisPassword})
+	defer func() { _ = rdb.Close() }()
+	sessions := session.NewStore(rdb)
+
 	// NATS JetStream + relay: события из outbox публикуются в шину.
 	nc, js, err := natsx.Connect(cfg.NATSURL, serviceName)
 	if err != nil {
@@ -112,11 +120,13 @@ func run() error {
 	userRepo := repo.NewUserRepo(pool)
 	svc := app.NewService(userRepo)
 	bot := telegram.New(cfg.TelegramBotToken)
-	webhook := transport.NewWebhookHandler(cfg.TelegramWebhookSecret, svc, bot, log)
+	webhook := transport.NewWebhookHandler(cfg.TelegramWebhookSecret, svc, bot, sessions, log)
+	sessionHandler := transport.NewSessionHandler(sessions, cfg.TelegramBotUsername, log)
 
 	router := transport.NewRouter(transport.Deps{
 		Log:            log,
 		Webhook:        webhook,
+		Session:        sessionHandler,
 		MetricsHandler: metricsHandler,
 		ReadyChecks: map[string]httpx.Check{
 			"postgres": pool.Ping,
@@ -125,6 +135,9 @@ func run() error {
 					return errors.New("nats: нет соединения")
 				}
 				return nil
+			},
+			"redis": func(ctx context.Context) error {
+				return rdb.Ping(ctx).Err()
 			},
 		},
 	})

@@ -5,6 +5,7 @@ type botMessages struct {
 	askContact   string
 	contactBtn   string
 	confirmed    string
+	loggedIn     string
 	notOwned     string
 	invalidPhone string
 	genericErr   string
@@ -17,6 +18,7 @@ func messagesFor(lang string) botMessages {
 			askContact:   "Kirish uchun telefon raqamingizni yuboring 👇",
 			contactBtn:   "Raqamni yuborish",
 			confirmed:    "✅ Raqam tasdiqlandi.",
+			loggedIn:     "✅ Kirish tasdiqlandi. Ilovaga qayting.",
 			notOwned:     "Iltimos, o'z raqamingizni pastdagi tugma orqali yuboring.",
 			invalidPhone: "Telefon raqami noto'g'ri.",
 			genericErr:   "Xatolik yuz berdi. Keyinroq urinib ko'ring.",
@@ -26,6 +28,7 @@ func messagesFor(lang string) botMessages {
 		askContact:   "Для входа отправьте номер телефона 👇",
 		contactBtn:   "Отправить номер",
 		confirmed:    "✅ Номер подтверждён.",
+		loggedIn:     "✅ Вход подтверждён. Вернитесь в приложение.",
 		notOwned:     "Пожалуйста, отправьте свой номер кнопкой ниже.",
 		invalidPhone: "Некорректный номер телефона.",
 		genericErr:   "Произошла ошибка. Попробуйте позже.",

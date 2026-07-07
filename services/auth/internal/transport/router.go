@@ -20,6 +20,7 @@ const serviceName = "auth"
 type Deps struct {
 	Log            *slog.Logger
 	Webhook        *WebhookHandler
+	Session        *SessionHandler
 	ReadyChecks    map[string]httpx.Check
 	MetricsHandler http.Handler
 }
@@ -44,7 +45,13 @@ func NewRouter(d Deps) http.Handler {
 	r.Route("/api/v1/auth", func(auth chi.Router) {
 		// Вебхук Telegram: подлинность — по X-Telegram-Bot-Api-Secret-Token.
 		auth.Post("/telegram/webhook", d.Webhook.Handle)
-		// session/init, session/{nonce}, refresh, logout — Stage 1.2+.
+
+		// Логин по nonce/deep-link: клиент инициирует вход и опрашивает статус.
+		if d.Session != nil {
+			auth.Post("/session/init", d.Session.Init)
+			auth.Get("/session/{nonce}", d.Session.Status)
+		}
+		// refresh, logout — Stage 1.4+.
 	})
 
 	notFound := func(w http.ResponseWriter, req *http.Request) {

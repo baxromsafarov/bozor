@@ -27,18 +27,27 @@ type Bot interface {
 	SendText(ctx context.Context, chatID int64, text string) error
 }
 
+// SessionLinker связывает логин-сессию (nonce) с Telegram-пользователем и
+// подтверждает её после регистрации контакта (реализуется session.Store).
+type SessionLinker interface {
+	Link(ctx context.Context, nonce string, telegramUserID int64) error
+	Confirm(ctx context.Context, telegramUserID int64, userID string) (nonce string, err error)
+}
+
 // WebhookHandler принимает обновления Telegram Bot API и ведёт flow
-// request_contact: /start → кнопка запроса контакта; contact → регистрация.
+// request_contact: /start[ <nonce>] → кнопка запроса контакта (и привязка
+// deep-link-сессии); contact → регистрация и подтверждение сессии.
 type WebhookHandler struct {
-	secret []byte
-	app    *app.Service
-	bot    Bot
-	log    *slog.Logger
+	secret   []byte
+	app      *app.Service
+	bot      Bot
+	sessions SessionLinker
+	log      *slog.Logger
 }
 
 // NewWebhookHandler создаёт обработчик вебхука.
-func NewWebhookHandler(secret string, svc *app.Service, bot Bot, log *slog.Logger) *WebhookHandler {
-	return &WebhookHandler{secret: []byte(secret), app: svc, bot: bot, log: log}
+func NewWebhookHandler(secret string, svc *app.Service, bot Bot, sessions SessionLinker, log *slog.Logger) *WebhookHandler {
+	return &WebhookHandler{secret: []byte(secret), app: svc, bot: bot, sessions: sessions, log: log}
 }
 
 // Handle проверяет secret-token, разбирает обновление и всегда отвечает 2xx
@@ -78,10 +87,30 @@ func (h *WebhookHandler) handleStart(ctx context.Context, msg *message) {
 	if msg.From == nil {
 		return
 	}
+	// /start <nonce> — пользователь пришёл по deep-link: привязываем сессию.
+	// Невалидный/истёкший nonce не мешает регистрации — просто не будет
+	// подтверждена web-сессия.
+	if nonce := startPayload(msg.Text); nonce != "" && h.sessions != nil {
+		if err := h.sessions.Link(ctx, nonce, msg.From.ID); err != nil {
+			h.log.InfoContext(ctx, "deep-link nonce не привязан",
+				slog.Int64("telegram_user_id", msg.From.ID), slog.String("error", err.Error()))
+		}
+	}
+
 	m := messagesFor(domain.NormalizeLang(msg.From.LanguageCode))
 	if err := h.bot.SendContactRequest(ctx, msg.From.ID, m.askContact, m.contactBtn); err != nil {
 		h.log.WarnContext(ctx, "не удалось отправить запрос контакта", slog.String("error", err.Error()))
 	}
+}
+
+// startPayload извлекает аргумент команды /start ("/start <payload>" → payload;
+// без аргумента — пустая строка). Payload deep-link — это nonce логина.
+func startPayload(text string) string {
+	fields := strings.Fields(text)
+	if len(fields) >= 2 {
+		return fields[1]
+	}
+	return ""
 }
 
 func (h *WebhookHandler) handleContact(ctx context.Context, msg *message) {
@@ -90,7 +119,7 @@ func (h *WebhookHandler) handleContact(ctx context.Context, msg *message) {
 	}
 	m := messagesFor(domain.NormalizeLang(msg.From.LanguageCode))
 
-	created, err := h.app.RegisterContact(ctx, app.Contact{
+	res, err := h.app.RegisterContact(ctx, app.Contact{
 		FromID:        msg.From.ID,
 		ContactUserID: msg.Contact.UserID,
 		PhoneNumber:   msg.Contact.PhoneNumber,
@@ -105,8 +134,21 @@ func (h *WebhookHandler) handleContact(ctx context.Context, msg *message) {
 	}
 
 	h.log.InfoContext(ctx, "контакт обработан",
-		slog.Int64("telegram_user_id", msg.From.ID), slog.Bool("created", created))
-	if err := h.bot.SendText(ctx, msg.From.ID, m.confirmed); err != nil {
+		slog.Int64("telegram_user_id", msg.From.ID), slog.Bool("created", res.Created))
+
+	// Если пользователь пришёл по deep-link — подтверждаем его web-сессию.
+	confirmText := m.confirmed
+	if h.sessions != nil {
+		nonce, err := h.sessions.Confirm(ctx, msg.From.ID, res.UserID)
+		switch {
+		case err != nil:
+			h.log.WarnContext(ctx, "не удалось подтвердить логин-сессию", slog.String("error", err.Error()))
+		case nonce != "":
+			confirmText = m.loggedIn // вход по deep-link — просим вернуться в приложение
+		}
+	}
+
+	if err := h.bot.SendText(ctx, msg.From.ID, confirmText); err != nil {
 		h.log.WarnContext(ctx, "не удалось отправить подтверждение", slog.String("error", err.Error()))
 	}
 }

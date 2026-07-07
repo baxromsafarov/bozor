@@ -59,9 +59,10 @@ func TestUpsertUserWithEvent_Integration(t *testing.T) {
 	require.NoError(t, err)
 
 	// Первый апсерт — создание + событие в outbox.
-	created, err := r.UpsertUserWithEvent(ctx, u, ev)
+	id, created, err := r.UpsertUserWithEvent(ctx, u, ev)
 	require.NoError(t, err)
 	assert.True(t, created)
+	assert.Equal(t, u.ID, id, "при создании возвращается сгенерированный id")
 
 	var users, outbox int
 	require.NoError(t, pool.QueryRow(ctx, "SELECT count(*) FROM users").Scan(&users))
@@ -73,9 +74,10 @@ func TestUpsertUserWithEvent_Integration(t *testing.T) {
 	u.Phone = "+998900000000"
 	ev2, err := events.New(events.SubjectUserCreated, "auth", map[string]any{"user_id": u.ID})
 	require.NoError(t, err)
-	created, err = r.UpsertUserWithEvent(ctx, u, ev2)
+	id2, created, err := r.UpsertUserWithEvent(ctx, u, ev2)
 	require.NoError(t, err)
 	assert.False(t, created, "существующий пользователь только обновляется")
+	assert.Equal(t, u.ID, id2, "апсерт возвращает существующий id пользователя")
 
 	require.NoError(t, pool.QueryRow(ctx, "SELECT count(*) FROM users").Scan(&users))
 	require.NoError(t, pool.QueryRow(ctx, "SELECT count(*) FROM outbox").Scan(&outbox))

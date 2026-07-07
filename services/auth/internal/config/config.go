@@ -29,12 +29,20 @@ type Config struct {
 	// NATSURL — адрес NATS JetStream для публикации доменных событий.
 	NATSURL string
 
+	// RedisAddr — адрес Redis для nonce'ов логина (host:port).
+	RedisAddr string
+	// RedisPassword — пароль Redis (пустой в dev).
+	RedisPassword string
+
 	// TelegramWebhookSecret — ожидаемое значение заголовка
 	// X-Telegram-Bot-Api-Secret-Token во входящих вебхуках Telegram.
 	TelegramWebhookSecret string
 	// TelegramBotToken — токен бота для исходящих вызовов Bot API. Пустой —
 	// отправка сообщений отключена (dev без реального бота).
 	TelegramBotToken string
+	// TelegramBotUsername — username бота для сборки deep-link
+	// t.me/<username>?start=<nonce>. Пустой — ссылка не формируется (dev).
+	TelegramBotUsername string
 }
 
 // Load читает конфигурацию из окружения (fail-fast на обязательных ключах).
@@ -57,8 +65,11 @@ func Load() (*Config, error) {
 			config.String("POSTGRES_HOST", "postgres"),
 			config.String("POSTGRES_PORT", "5432")),
 		NATSURL:               config.String("NATS_URL", "nats://nats:4222"),
+		RedisAddr:             config.String("REDIS_ADDR", "redis:6379"),
+		RedisPassword:         config.String("REDIS_PASSWORD", ""),
 		TelegramWebhookSecret: config.String("TELEGRAM_WEBHOOK_SECRET", ""),
 		TelegramBotToken:      config.String("TELEGRAM_BOT_TOKEN", ""),
+		TelegramBotUsername:   config.String("TELEGRAM_BOT_USERNAME", ""),
 	}, nil
 }
 

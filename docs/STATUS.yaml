@@ -1,10 +1,10 @@
-status_id: "20260708-120000"
+status_id: "20260708-160000"
 project: "Bozor"
 version: "1.0"
 
 current:
   chapter: "1"                     # CHAPTER 1: Auth & Identity (Telegram bot phone-auth)
-  stage: "1.3"                     # STAGE 1.3: Nonce/deep-link — связывание клиентской сессии с Telegram-логином
+  stage: "1.4"                     # STAGE 1.4: JWT access + refresh (ротация, reuse-detection, device_id)
   status: "not_started"
 
 completed:
@@ -40,10 +40,14 @@ completed:
     title: "Phone-auth flow: request_contact — валидация владения, E.164, upsert, публикация bozor.user.created"
     completed_date: "2026-07-08"
     evidence: "Домен: NormalizePhoneUZ (E.164 +998########, из 12 цифр с 998 или 9 цифр) + NormalizeLang; sentinel ErrContactNotOwned/ErrInvalidPhone. Транспорт webhook: на /start бот шлёт кнопку request_contact (SendContactRequest, ReplyKeyboard request_contact:true), на contact — RegisterContact; локализация uz/ru; вебхук всегда 2xx для Telegram, бизнес-ошибки уходят ответом бота. КРИТИЧНО для безопасности: contact.user_id должен ==from.id (иначе ErrContactNotOwned) — пересланный чужой контакт отклоняется («отправьте свой номер»). App: RegisterContact нормализует телефон, генерирует UUIDv7, строит событие userCreated БЕЗ PII (только user_id, telegram_user_id, language_code). Repo UpsertUserWithEvent: pgxx.WithTx → INSERT ... ON CONFLICT(telegram_user_id) DO UPDATE ... RETURNING (xmax=0) AS created; событие в outbox только при created=true (идемпотентно, повторный контакт не плодит события). Тесты: unit (нормализация телефона/языка, webhook: свой контакт регистрируется/пересланный отклоняется/start шлёт кнопку) + integration на testcontainers (реальный postgres:18: первый апсерт created=true + 1 событие; повтор created=false, событий по-прежнему 1, телефон обновлён) — go test -tags=integration PASS; golangci-lint 0 issues. Живая проверка end-to-end (14/14 healthy): вебхук с валидным контактом → пользователь в users + событие в outbox → outbox.Relay (SKIP LOCKED) публикует bozor.user.created в JetStream (published_at выставляется только после успешной публикации); подтверждено: стрим BOZOR messages=2, published=t по обоим событиям. Впервые вживую проверен весь путь событий webhook→БД+outbox(одна tx)→relay→NATS"
+  - stage_id: "1.3"
+    title: "Nonce/deep-link: связывание клиентской сессии с Telegram-логином"
+    completed_date: "2026-07-08"
+    evidence: "Пакет session (Redis): Init генерирует одноразовый nonce (16 байт → 32 hex, TTL 3 мин, в пределах 2–5 по ROADMAP), SetNX status=pending; Link (на /start <nonce>) — только pending-nonce, обратная привязка auth:login:<tgid>→nonce; Confirm (после регистрации контакта) — помечает nonce confirmed+user_id (SET KeepTTL, чтобы не жил вечно), снимает привязку; Get — pending/confirmed или expired при отсутствии ключа. Одноразовость: связать/подтвердить можно только pending (повторно — ErrNotPending). Repo/App доработаны: UpsertUserWithEvent и RegisterContact возвращают фактический id пользователя (RETURNING id — существующий при конфликте) для подтверждения сессии. Транспорт: POST /api/v1/auth/session/init → 201 {nonce, deep_link t.me/<bot>?start=<nonce>, expires_in}; GET /api/v1/auth/session/{nonce} → {status[,user_id]} с валидацией формата nonce (регэксп hex32 → 422 invalid_nonce); webhook: /start <nonce> линкует сессию, contact по deep-link даёт особое сообщение «вход подтверждён». Конфиг: REDIS_ADDR/PASSWORD, TELEGRAM_BOT_USERNAME; readyz включает redis-ping. Тесты: unit (session HTTP: init/deep-link/pending/confirmed/malformed; webhook: /start линкует, contact подтверждает, обычный contact — простое подтверждение) + integration на testcontainers redis:8 (полный цикл init→link→confirm→get, single-use, expired, confirm без link) — go test -tags=integration PASS (repo 6.4s, session 9.9s); golangci-lint 0 issues (default+integration). Живая проверка (14/14 healthy): init через gateway → 201 nonce+deep-link+TTL180; poll pending; /start <nonce> (secret) → 200 (link, всё ещё pending); contact → 200 (register+confirm); poll → confirmed + реальный user_id (UUIDv7, совпал с users.id); malformed→422, неизвестный nonce→expired; Redis: nonce хранит confirmed+user_id+telegram_user_id с TTL; пользователь в БД, outbox 2/2 published, NATS BOZOR messages=2 (relay доставил)"
 
 next_actions:
-  - "Stage 1.3: nonce/deep-link — POST /auth/session/init (nonce в Redis, TTL 2-5 мин, single-use) + deep-link t.me/<bot>?start=<nonce>; связывание клиентской сессии с Telegram-логином; GET /auth/session/{nonce} → pending/confirmed/expired"
-  - "Далее 1.4–1.5: выпуск/ротация JWT (ADR-012), refresh-семейства + reuse-detection, logout, аудит, rate-limit на gateway"
+  - "Stage 1.4: JWT access (~15 мин: sub/roles/exp/iat/jti) + refresh (~30 дней): хранение хешем в refresh_tokens, ротация при каждом использовании, привязка к device_id, reuse-detection (отзыв семейства family_id), отзыв (ADR-012)"
+  - "Далее 1.5: интеграция проверки токенов в gateway, POST /auth/logout, аудит чувствительных действий, rate-limit на session/init и webhook — завершение CHAPTER 1"
 
 decisions:                         # краткие ссылки; полные ADR — в DECISIONS.md
   - decision: "Брокер — NATS JetStream (не Kafka) ради лёгкости на Compose"
@@ -94,10 +98,10 @@ tech_stack:
   deploy: ["Docker Compose", "nginx"]
 
 metrics:
-  completed_stages: 8
+  completed_stages: 9
   total_stages: 52
-  completion_percentage: 15
-  estimated_remaining_stages: 44
+  completion_percentage: 17
+  estimated_remaining_stages: 43
   chapters_completed: ["0"]        # CHAPTER 0 (Foundations & Platform) завершён
 
 notes: "Backend-only, фронтенда нет. Целевая нагрузка: десятки тысяч DAU. Автономный режим работы подтверждён заказчиком. Коммиты — от имени baxromsafarov. Окружение: Windows 11, Go 1.26.4, Docker Desktop 29.2.1 + Compose v5, golangci-lint 2.12.2, goose, buf. Нюанс: локально go test без -race (нет cgo на Windows); -race выполняется в CI на Ubuntu. goconst min-occurrences=5. Инфра-нюансы (Stage 0.3): postgres:18 монтирует /var/lib/postgresql (не .../data); healthcheck typesense — через bash /dev/tcp (нет curl/wget/nc в образе). Локальный .env создаётся из .env.example (gitignore)."

@@ -16,7 +16,7 @@ const source = "auth"
 
 // Store — персистентность пользователей (реализуется repo.UserRepo).
 type Store interface {
-	UpsertUserWithEvent(ctx context.Context, u domain.User, ev events.Envelope) (created bool, err error)
+	UpsertUserWithEvent(ctx context.Context, u domain.User, ev events.Envelope) (id string, created bool, err error)
 }
 
 // Service — use-cases Auth-сервиса.
@@ -40,26 +40,34 @@ type Contact struct {
 	LanguageCode  string
 }
 
+// RegisterResult — итог обработки контакта: фактический id пользователя в БД
+// и признак «создан впервые». UserID нужен для подтверждения логин-сессии.
+type RegisterResult struct {
+	UserID  string
+	Created bool
+}
+
 // RegisterContact обрабатывает присланный контакт: проверяет владение,
 // нормализует телефон, апсертит пользователя; при первом создании публикует
-// bozor.user.created (через outbox). Возвращает признак «создан впервые».
-func (s *Service) RegisterContact(ctx context.Context, c Contact) (bool, error) {
+// bozor.user.created (через outbox). Возвращает id пользователя и признак
+// «создан впервые».
+func (s *Service) RegisterContact(ctx context.Context, c Contact) (RegisterResult, error) {
 	// КРИТИЧНО (безопасность): контакт должен принадлежать отправителю —
 	// иначе пользователь переслал чужой контакт.
 	if c.ContactUserID == 0 || c.ContactUserID != c.FromID {
-		return false, apperr.Wrap(domain.ErrContactNotOwned, apperr.KindForbidden, "contact_not_owned",
+		return RegisterResult{}, apperr.Wrap(domain.ErrContactNotOwned, apperr.KindForbidden, "contact_not_owned",
 			"Отправьте свой номер кнопкой", "O'z raqamingizni tugma orqali yuboring")
 	}
 
 	phone, err := domain.NormalizePhoneUZ(c.PhoneNumber)
 	if err != nil {
-		return false, apperr.Wrap(err, apperr.KindInvalid, "invalid_phone",
+		return RegisterResult{}, apperr.Wrap(err, apperr.KindInvalid, "invalid_phone",
 			"Некорректный номер телефона", "Telefon raqami noto'g'ri")
 	}
 
 	id, err := uuid.NewV7()
 	if err != nil {
-		return false, apperr.Wrap(err, apperr.KindInternal, "id_gen",
+		return RegisterResult{}, apperr.Wrap(err, apperr.KindInternal, "id_gen",
 			"Внутренняя ошибка", "Ichki xatolik")
 	}
 
@@ -81,11 +89,15 @@ func (s *Service) RegisterContact(ctx context.Context, c Contact) (bool, error) 
 		LanguageCode:   lang,
 	})
 	if err != nil {
-		return false, apperr.Wrap(err, apperr.KindInternal, "event_build",
+		return RegisterResult{}, apperr.Wrap(err, apperr.KindInternal, "event_build",
 			"Внутренняя ошибка", "Ichki xatolik")
 	}
 
-	return s.store.UpsertUserWithEvent(ctx, u, ev)
+	persistedID, created, err := s.store.UpsertUserWithEvent(ctx, u, ev)
+	if err != nil {
+		return RegisterResult{}, err
+	}
+	return RegisterResult{UserID: persistedID, Created: created}, nil
 }
 
 // userCreated — payload события bozor.user.created.

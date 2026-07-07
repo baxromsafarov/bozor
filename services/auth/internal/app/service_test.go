@@ -21,10 +21,10 @@ type fakeStore struct {
 	err     error
 }
 
-func (f *fakeStore) UpsertUserWithEvent(_ context.Context, u domain.User, _ events.Envelope) (bool, error) {
+func (f *fakeStore) UpsertUserWithEvent(_ context.Context, u domain.User, _ events.Envelope) (string, bool, error) {
 	f.called = true
 	f.gotUser = u
-	return f.created, f.err
+	return u.ID, f.created, f.err
 }
 
 func TestRegisterContact_RejectsForwardedContact(t *testing.T) {
@@ -68,15 +68,16 @@ func TestRegisterContact_UpsertsNormalizedUser(t *testing.T) {
 	store := &fakeStore{created: true}
 	svc := NewService(store)
 
-	created, err := svc.RegisterContact(context.Background(), Contact{
+	res, err := svc.RegisterContact(context.Background(), Contact{
 		FromID: 42, ContactUserID: 42, PhoneNumber: "901234567",
 		FirstName: "Али", LanguageCode: "uz-UZ",
 	})
 	require.NoError(t, err)
-	assert.True(t, created)
+	assert.True(t, res.Created)
 	require.True(t, store.called)
 	assert.Equal(t, int64(42), store.gotUser.TelegramUserID)
 	assert.Equal(t, "+998901234567", store.gotUser.Phone, "телефон нормализован в E.164")
 	assert.Equal(t, "uz", store.gotUser.LanguageCode, "язык нормализован")
 	assert.NotEmpty(t, store.gotUser.ID, "id сгенерирован")
+	assert.Equal(t, store.gotUser.ID, res.UserID, "возвращён фактический id пользователя")
 }
