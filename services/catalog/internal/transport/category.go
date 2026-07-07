@@ -2,7 +2,6 @@ package transport
 
 import (
 	"context"
-	"errors"
 	"log/slog"
 	"net/http"
 
@@ -146,24 +145,7 @@ func (h *Handler) Delete(w http.ResponseWriter, r *http.Request) {
 
 // writeCategoryError переводит доменные ошибки в HTTP-ответы RFC 7807.
 func (h *Handler) writeCategoryError(w http.ResponseWriter, r *http.Request, err error) {
-	switch {
-	case errors.Is(err, domain.ErrCategoryNotFound):
-		httpx.WriteProblem(w, r, apperr.New(apperr.KindNotFound, "category_not_found",
-			"Категория не найдена", "Kategoriya topilmadi"))
-	case errors.Is(err, domain.ErrParentNotFound):
-		httpx.WriteProblem(w, r, apperr.New(apperr.KindInvalid, "parent_not_found",
-			"Родительская категория не найдена", "Ota kategoriya topilmadi"))
-	case errors.Is(err, domain.ErrSlugConflict):
-		httpx.WriteProblem(w, r, apperr.New(apperr.KindConflict, "slug_conflict",
-			"Категория с таким slug уже существует", "Bunday slug allaqachon mavjud"))
-	case errors.Is(err, domain.ErrHasChildren):
-		httpx.WriteProblem(w, r, apperr.New(apperr.KindConflict, "has_children",
-			"Сначала удалите подкатегории", "Avval quyi kategoriyalarni o'chiring"))
-	default:
-		h.log.ErrorContext(r.Context(), "ошибка каталога", slog.String("error", err.Error()))
-		httpx.WriteProblem(w, r, apperr.New(apperr.KindInternal, "catalog_failed",
-			"Внутренняя ошибка", "Ichki xatolik"))
-	}
+	writeCatalogError(w, r, h.log, err)
 }
 
 func toResponse(c domain.Category) categoryResponse {

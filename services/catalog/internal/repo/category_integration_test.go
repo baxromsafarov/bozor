@@ -47,6 +47,12 @@ func startDB(t *testing.T) *pgxpool.Pool {
 	pool, err := pgxpool.New(ctx, dsn)
 	require.NoError(t, err)
 	t.Cleanup(pool.Close)
+
+	// Схема применена вместе с сид-миграцией (00003). Тесты работают с чистыми
+	// таблицами, чтобы не зависеть от сид-данных — вычищаем их.
+	_, err = pool.Exec(ctx,
+		`TRUNCATE category_attributes, attribute_options, attributes, categories, outbox RESTART IDENTITY CASCADE`)
+	require.NoError(t, err)
 	return pool
 }
 

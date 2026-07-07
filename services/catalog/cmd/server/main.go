@@ -116,12 +116,16 @@ func run() error {
 	}()
 	defer wg.Wait()
 
-	svc := app.NewService(repo.NewRepo(pool), cache.NewTreeCache(rdb, treeCacheTTL), log)
+	catalogRepo := repo.NewRepo(pool)
+	svc := app.NewService(catalogRepo, cache.NewTreeCache(rdb, treeCacheTTL), log)
 	handler := transport.NewHandler(svc, log)
+	attrSvc := app.NewAttributeService(catalogRepo, catalogRepo, log)
+	attrHandler := transport.NewAttributeHandler(attrSvc, log)
 
 	router := transport.NewRouter(transport.Deps{
 		Log:            log,
 		Handler:        handler,
+		AttributeH:     attrHandler,
 		MetricsHandler: metricsHandler,
 		ReadyChecks: map[string]httpx.Check{
 			"postgres": pool.Ping,

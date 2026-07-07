@@ -21,6 +21,7 @@ const serviceName = "catalog"
 type Deps struct {
 	Log            *slog.Logger
 	Handler        *Handler
+	AttributeH     *AttributeHandler
 	ReadyChecks    map[string]httpx.Check
 	MetricsHandler http.Handler
 }
@@ -48,10 +49,22 @@ func NewRouter(d Deps) http.Handler {
 		// Чтение дерева — публично (плоский путь без завершающего слеша).
 		api.Get("/api/v1/categories", d.Handler.Tree)
 
-		// Запись — только персонал (admin/moderator).
+		// Запись категорий — только персонал (admin/moderator).
 		api.With(requireStaff).Post("/api/v1/categories", d.Handler.Create)
 		api.With(requireStaff).Patch("/api/v1/categories/{id}", d.Handler.Update)
 		api.With(requireStaff).Delete("/api/v1/categories/{id}", d.Handler.Delete)
+
+		// Эффективные атрибуты категории (собственные + унаследованные) — публично.
+		api.Get("/api/v1/categories/{id}/attributes", d.AttributeH.CategoryAttributes)
+		api.With(requireStaff).Post("/api/v1/categories/{id}/attributes", d.AttributeH.Link)
+		api.With(requireStaff).Delete("/api/v1/categories/{id}/attributes/{attributeId}", d.AttributeH.Unlink)
+
+		// Определения атрибутов: чтение публично, запись — персонал.
+		api.Get("/api/v1/attributes", d.AttributeH.List)
+		api.Get("/api/v1/attributes/{id}", d.AttributeH.Get)
+		api.With(requireStaff).Post("/api/v1/attributes", d.AttributeH.Create)
+		api.With(requireStaff).Patch("/api/v1/attributes/{id}", d.AttributeH.Update)
+		api.With(requireStaff).Delete("/api/v1/attributes/{id}", d.AttributeH.Delete)
 	})
 
 	notFound := func(w http.ResponseWriter, req *http.Request) {
