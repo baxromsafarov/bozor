@@ -1,10 +1,10 @@
-status_id: "20260707-010000"
+status_id: "20260707-020000"
 project: "Bozor"
 version: "1.0"
 
 current:
   chapter: "0"                     # CHAPTER 0: Foundations & Platform
-  stage: "0.5"                     # STAGE 0.5: Стек наблюдаемости (Prometheus/Grafana/Loki/Tempo)
+  stage: "0.6"                     # STAGE 0.6: Фреймворк миграций goose (forward-only) + сиды
   status: "not_started"
 
 completed:
@@ -24,10 +24,14 @@ completed:
     title: "API Gateway (chi): routing, JWT, rate-limit, CORS, RFC 7807"
     completed_date: "2026-07-07"
     evidence: "services/gateway (модуль bozor/services/gateway в go.work). Middleware-цепочка из pkg/shared (recover→request-id→lang→access-log→otel→CORS→strip-identity; под /api/v1: optional-auth→rate-limit→reverse-proxy). Optional-auth: проверка JWT если передан, иначе аноним; невалидный → 401 (ADR-014). Проброс идентичности: вычистка клиентских X-User-* + проставление из клеймов. Rate-limit: Redis token-bucket через atomic Lua (server TIME, TTL=полное пополнение), заголовки X-RateLimit-*, fail-open. Reverse-proxy по таблице префиксов на 13 сервисов; недоступность апстрима → 503 RFC 7807. CORS + preflight. Dockerfile multi-stage → distroless static nonroot, healthcheck без shell (/gateway -health). Тесты: unit (config, middleware, router — proxy/identity/strip/401/429/fail-open/CORS/404/503) + integration (Redis token-bucket, env-gated). go test ok; golangci-lint 0 issues (оба модуля). Живая проверка в compose: 8/8 healthy; /healthz 200, /readyz ready (redis), маршрут→503 upstream_unavailable, invalid JWT→401, CORS preflight→204, edge nginx→gateway с пробросом X-Request-Id, rate-limit: burst=3 → 3 пропущено (503) + 37×429 при 40 конкурентных запросах"
+  - stage_id: "0.5"
+    title: "Стек наблюдаемости: Tempo, Loki, Alloy, Prometheus, Grafana"
+    completed_date: "2026-07-07"
+    evidence: "deploy/observability/* + 5 сервисов в compose (ADR-015). Трейсы: gateway → OTLP → Tempo (проверено: tempo_distributor_spans_received_total>1200, поиск трасс по service.name=gateway). Метрики: новый otelx.SetupMetrics (OTel MeterProvider + Prometheus-экспортёр) → otelhttp пишет RED автоматически; /metrics на gateway; Prometheus scrape (job gateway up, http_server_request_duration_seconds с http_route/status, p95 считается). Логи: JSON stdout → Alloy (docker discovery, извлечение level/service/trace_id) → Loki (проверено: label svc=gateway). Grafana: provision источников (Prometheus/Loki/Tempo, derived field trace_id→Tempo) + 2 дашборда (Gateway RED, Infra Health/USE) — проверен end-to-end запрос через datasource proxy. Алерты: правила TargetDown/GatewayHighErrorRate/GatewayHighLatencyP95 в Prometheus. Живая проверка: 13/13 контейнеров healthy; go test + golangci-lint 0 issues (оба модуля). Alertmanager и cadvisor/node-exporter — отложены (в ADR-015)"
 
 next_actions:
-  - "Stage 0.5: стек наблюдаемости — Prometheus, Grafana, Loki, Tempo в compose; подключить OTLP-экспортёр gateway (OTEL_EXPORTER_OTLP_ENDPOINT); базовые дашборды RED/USE и алерты"
-  - "Далее Stage 0.6: фреймворк миграций goose (forward-only) + сиды"
+  - "Stage 0.6: фреймворк миграций goose (forward-only) — pkg/shared хелпер запуска миграций при старте (advisory-lock), структура services/<svc>/migrations, механизм сидов"
+  - "Далее Stage 0.7+ по ROADMAP (завершение CHAPTER 0)"
 
 decisions:                         # краткие ссылки; полные ADR — в DECISIONS.md
   - decision: "Брокер — NATS JetStream (не Kafka) ради лёгкости на Compose"
@@ -58,6 +62,10 @@ decisions:                         # краткие ссылки; полные A
     rationale: "Тонкий gateway без бизнес-логики: проверка входа для эндпоинта — в сервисах; rate-limiter не должен быть SPOF; заголовкам X-User-* доверяет только приватная сеть"
     date: "2026-07-07"
     alternatives: ["Строгая protected-таблица на gateway", "fail-closed rate-limit", "внутренний пере-подписанный JWT"]
+  - decision: "Наблюдаемость: OTel traces→Tempo, OTel metrics→Prometheus (pull), логи→Loki через Alloy, без центрального коллектора (ADR-015)"
+    rationale: "Меньше движущихся частей на одном хосте; otelhttp пишет RED автоматически; Alloy вместо EOL-Promtail; сервис получает наблюдаемость из pkg/shared из коробки"
+    date: "2026-07-07"
+    alternatives: ["Центральный OTel Collector", "Promtail", "ручной client_golang для метрик", "Jaeger"]
 
 open_questions: []
 
@@ -74,9 +82,9 @@ tech_stack:
   deploy: ["Docker Compose", "nginx"]
 
 metrics:
-  completed_stages: 4
+  completed_stages: 5
   total_stages: 52
-  completion_percentage: 8
-  estimated_remaining_stages: 48
+  completion_percentage: 10
+  estimated_remaining_stages: 47
 
 notes: "Backend-only, фронтенда нет. Целевая нагрузка: десятки тысяч DAU. Автономный режим работы подтверждён заказчиком. Коммиты — от имени baxromsafarov. Окружение: Windows 11, Go 1.26.4, Docker Desktop 29.2.1 + Compose v5, golangci-lint 2.12.2, goose, buf. Нюанс: локально go test без -race (нет cgo на Windows); -race выполняется в CI на Ubuntu. goconst min-occurrences=5. Инфра-нюансы (Stage 0.3): postgres:18 монтирует /var/lib/postgresql (не .../data); healthcheck typesense — через bash /dev/tcp (нет curl/wget/nc в образе). Локальный .env создаётся из .env.example (gitignore)."

@@ -33,6 +33,7 @@ type Deps struct {
 	AllowedOrigins []string
 	Upstream       func(service string) string // резолвер базового URL сервиса
 	ReadyChecks    map[string]httpx.Check
+	MetricsHandler http.Handler // обработчик /metrics (Prometheus); nil — эндпоинт не монтируется
 }
 
 // NewRouter собирает роутер API Gateway. Возвращает ошибку, если базовый
@@ -57,6 +58,9 @@ func NewRouter(d Deps) (http.Handler, error) {
 	// Служебные эндпоинты самого gateway (не проксируются).
 	r.Get("/healthz", httpx.HealthHandler())
 	r.Get("/readyz", httpx.ReadyHandler(d.ReadyChecks))
+	if d.MetricsHandler != nil {
+		r.Handle("/metrics", d.MetricsHandler)
+	}
 
 	// Внешний API: проверка JWT (если передан) → rate-limit → проксирование.
 	r.Route("/api/v1", func(api chi.Router) {

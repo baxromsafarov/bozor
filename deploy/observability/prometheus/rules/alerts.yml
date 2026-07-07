@@ -1,0 +1,38 @@
+# Базовые правила алертинга (RED + доступность целей).
+# Alertmanager подключается позже; правила видны и срабатывают в Prometheus /alerts.
+groups:
+  - name: availability
+    rules:
+      - alert: TargetDown
+        expr: up == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Цель {{ $labels.job }} недоступна"
+          description: "{{ $labels.instance }} (job {{ $labels.job }}) не отвечает на scrape > 1 мин."
+
+  - name: gateway-red
+    rules:
+      - alert: GatewayHighErrorRate
+        expr: |
+          sum(rate(http_server_request_duration_seconds_count{job="gateway",http_response_status_code=~"5.."}[5m]))
+            / sum(rate(http_server_request_duration_seconds_count{job="gateway"}[5m])) > 0.05
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Высокая доля 5xx на gateway"
+          description: "Доля ответов 5xx на gateway выше 5% в течение 5 мин."
+
+      - alert: GatewayHighLatencyP95
+        expr: |
+          histogram_quantile(0.95,
+            sum(rate(http_server_request_duration_seconds_bucket{job="gateway"}[5m])) by (le)
+          ) > 0.3
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Высокая p95-латентность gateway"
+          description: "p95 длительности запросов gateway превышает 300 мс в течение 5 мин."

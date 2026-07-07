@@ -1,0 +1,53 @@
+// Grafana Alloy — сбор логов контейнеров Docker и отправка в Loki.
+// Наши сервисы пишут структурированный JSON в stdout; level/service/trace_id
+// извлекаются в метки для удобной фильтрации в Grafana.
+
+discovery.docker "containers" {
+	host = "unix:///var/run/docker.sock"
+}
+
+discovery.relabel "containers" {
+	targets = discovery.docker.containers.targets
+
+	rule {
+		source_labels = ["__meta_docker_container_name"]
+		regex         = "/(.*)"
+		target_label  = "container"
+	}
+	rule {
+		source_labels = ["__meta_docker_container_label_com_docker_compose_service"]
+		target_label  = "service"
+	}
+}
+
+loki.source.docker "default" {
+	host       = "unix:///var/run/docker.sock"
+	targets    = discovery.relabel.containers.output
+	forward_to = [loki.process.default.receiver]
+	labels     = { job = "docker" }
+}
+
+loki.process "default" {
+	forward_to = [loki.write.default.receiver]
+
+	// JSON-логи сервисов Bozor: вытаскиваем поля в метки.
+	stage.json {
+		expressions = {
+			level      = "level",
+			svc        = "service",
+			trace_id   = "trace_id",
+		}
+	}
+	stage.labels {
+		values = {
+			level = "",
+			svc   = "",
+		}
+	}
+}
+
+loki.write "default" {
+	endpoint {
+		url = "http://loki:3100/loki/api/v1/push"
+	}
+}

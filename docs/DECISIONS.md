@@ -537,4 +537,42 @@ Redis-клиент пока живёт в модуле gateway; общий `pkg/
 
 ---
 
+## ADR-015: Наблюдаемость — OTel traces→Tempo, OTel metrics→Prometheus (pull), логи→Loki через Alloy; без центрального коллектора
+
+- **Статус:** accepted
+- **Дата:** 2026-07-07
+- **Автор:** AI-инженер, по согласованию с ТЗ (мастер-промт, раздел 8; ARCHITECTURE.md §7.5)
+
+### Контекст
+
+Stage 0.5 разворачивает три столпа наблюдаемости на одном Compose-хосте: трейсы, метрики (RED на сервис, USE на ресурсы), логи (структурированный JSON с trace/request id) — с визуализацией в Grafana и базовыми правилами алертинга. Нужно выбрать конвейер сбора, минимально нагружающий хост и единообразный для всех будущих сервисов, чтобы новый сервис получал наблюдаемость «из коробки» через `pkg/shared`.
+
+### Рассмотренные варианты и решения
+
+**Трейсы — OTel SDK → OTLP gRPC → Tempo (напрямую).**
+- Tempo — часть Grafana-стека, дешёвое трейс-хранилище с нативным OTLP-приёмником; `pkg/shared/otelx.Setup` уже экспортирует по `OTEL_EXPORTER_OTLP_ENDPOINT`. Отклонён Jaeger (отдельная экосистема; Grafana-стек предпочтительнее для единого UI).
+
+**Метрики — OTel MeterProvider + Prometheus-экспортёр; Prometheus scrape (pull) по `/metrics`.**
+- Добавлен `otelx.SetupMetrics`: ставит глобальный MeterProvider с экспортёром `exporters/prometheus`; инструментация `otelhttp` (уже в цепочке middleware) **автоматически** пишет RED-метрики HTTP-сервера (`http_server_request_duration_seconds{http_route,http_response_status_code,...}`) — нового middleware не потребовалось. `/metrics` отдаёт их вместе с `go_*`/`process_*` (для USE).
+- Отклонён ручной `client_golang`-middleware: OTel-путь консистентнее с трейсами и даёт `http_route`/метод/статус без дублирующего кода. Модель pull (Prometheus scrape) выбрана вместо push/remote-write ради простоты на одном хосте.
+
+**Логи — JSON в stdout → Grafana Alloy (docker discovery) → Loki.**
+- Сервисы уже логируют JSON в stdout (`pkg/shared/logging`); Alloy читает логи контейнеров через Docker API, извлекает `level`/`service`/`trace_id` в метки и шлёт в Loki. В Grafana derived field связывает `trace_id` из лога с трассой в Tempo.
+- **Выбран Alloy, а не Promtail:** Promtail объявлен EOL (замена — Alloy). Отклонён вариант «Loki Docker logging driver» (недекларативная установка плагина в Compose).
+
+**Топология — без центрального otel-collector.**
+- Каждый сервис экспортирует трейсы напрямую в Tempo; метрики собираются pull'ом; логи — Alloy'ем. На одном хосте это меньше движущихся частей. Отклонён центральный OTel Collector (оправдан при росте: маршрутизация/семплинг/трансформация — вводится отдельным ADR).
+
+**Алертинг — правила в Prometheus; Alertmanager позже.**
+- Заданы правила (TargetDown, GatewayHighErrorRate, GatewayHighLatencyP95) — они вычисляются и видны в Prometheus `/alerts`. Доставка (Alertmanager + канал, напр. Telegram) подключается отдельным шагом, когда появится приёмник.
+
+### Последствия
+
+- Новый сервис получает наблюдаемость, вызвав `otelx.Setup` + `otelx.SetupMetrics` и смонтировав `/metrics`; логи собираются автоматически (Alloy видит любой контейнер). Дашборды/алерты уже опираются на semconv-имена метрик — переиспользуемы между сервисами.
+- Grafana provision'ит источники (Prometheus/Loki/Tempo) и дашборды (Gateway RED, Infra Health/USE) из файлов — воспроизводимо, без ручной настройки.
+- Прямой экспорт в Tempo создаёт зависимость сервиса от доступности Tempo для трасс (не критично: OTLP-экспортёр батчит и не блокирует запросы; при пустом endpoint — no-op).
+- **Условия пересмотра:** рост нагрузки/числа сервисов → ввод центрального OTel Collector (семплинг, буферизация, единая точка экспорта) и/или переход метрик на remote-write; подключение Alertmanager и каналов доставки; вынос хранилищ трасс/логов на отдельные тома/хосты; добавление cadvisor/node-exporter для полноценного USE по контейнерам/хосту.
+
+---
+
 *Конец журнала. Новые решения добавляются в конец с очередным номером ADR.*

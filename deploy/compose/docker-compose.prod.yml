@@ -23,6 +23,16 @@ services:
     <<: *prod
   minio:
     <<: *prod
+  tempo:
+    <<: *prod
+  loki:
+    <<: *prod
+  alloy:
+    <<: *prod
+  prometheus:
+    <<: *prod
+  grafana:
+    <<: *prod
   gateway:
     <<: *prod
   nginx:

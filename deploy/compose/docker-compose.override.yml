@@ -25,6 +25,12 @@ services:
   gateway:
     ports:
       - "127.0.0.1:8080:8080"   # прямой доступ к gateway в обход nginx (dev)
+  grafana:
+    ports:
+      - "127.0.0.1:3000:3000"   # UI Grafana
+  prometheus:
+    ports:
+      - "127.0.0.1:9090:9090"   # UI Prometheus
   nginx:
     ports:
       - "127.0.0.1:8090:80"

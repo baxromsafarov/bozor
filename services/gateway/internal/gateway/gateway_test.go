@@ -222,6 +222,28 @@ func TestRouter_Health(t *testing.T) {
 	assert.Contains(t, rec.Body.String(), "ok")
 }
 
+func TestRouter_MetricsMounted(t *testing.T) {
+	stub := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, "# HELP up\n")
+	})
+	h, err := NewRouter(Deps{
+		Log:            discardLogger(),
+		Limiter:        fakeLimiter{res: ratelimit.Result{Allowed: true}},
+		AllowedOrigins: []string{"*"},
+		Upstream:       func(string) string { return "http://127.0.0.1:1" },
+		MetricsHandler: stub,
+	})
+	require.NoError(t, err)
+
+	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Contains(t, rec.Body.String(), "# HELP")
+}
+
 func TestRouter_UpstreamUnavailable(t *testing.T) {
 	// Апстрим указывает на закрытый порт — proxy обязан вернуть 503 RFC 7807.
 	router := newTestRouter(t, nil, "http://127.0.0.1:1")

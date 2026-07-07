@@ -61,6 +61,18 @@ func run() error {
 		}
 	}()
 
+	metricsHandler, shutdownMetrics, err := otelx.SetupMetrics(serviceName)
+	if err != nil {
+		return fmt.Errorf("инициализация метрик: %w", err)
+	}
+	defer func() {
+		shCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := shutdownMetrics(shCtx); err != nil {
+			log.Error("остановка метрик", slog.String("error", err.Error()))
+		}
+	}()
+
 	rdb := redis.NewClient(&redis.Options{Addr: cfg.RedisAddr, Password: cfg.RedisPassword})
 	defer func() { _ = rdb.Close() }()
 
@@ -75,6 +87,7 @@ func run() error {
 		ReadyChecks: map[string]httpx.Check{
 			"redis": func(ctx context.Context) error { return rdb.Ping(ctx).Err() },
 		},
+		MetricsHandler: metricsHandler,
 	})
 	if err != nil {
 		return err

@@ -41,6 +41,26 @@ func TestSetup(t *testing.T) {
 	}
 }
 
+func TestSetupMetrics(t *testing.T) {
+	handler, shutdown, err := SetupMetrics("test-service")
+	require.NoError(t, err)
+	require.NotNil(t, handler)
+	require.NotNil(t, shutdown)
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+
+	assert.Equal(t, http.StatusOK, rec.Code)
+	// Стандартные коллекторы Go/process должны присутствовать.
+	body := rec.Body.String()
+	assert.Contains(t, body, "go_goroutines")
+	assert.Contains(t, body, "process_")
+
+	assert.NotPanics(t, func() {
+		assert.NoError(t, shutdown(context.Background()))
+	})
+}
+
 func TestHTTPMiddleware(t *testing.T) {
 	mw := HTTPMiddleware("test-service")
 	require.NotNil(t, mw)
