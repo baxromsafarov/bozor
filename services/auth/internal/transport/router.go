@@ -21,6 +21,7 @@ type Deps struct {
 	Log            *slog.Logger
 	Webhook        *WebhookHandler
 	Session        *SessionHandler
+	Token          *TokenHandler
 	ReadyChecks    map[string]httpx.Check
 	MetricsHandler http.Handler
 }
@@ -51,7 +52,11 @@ func NewRouter(d Deps) http.Handler {
 			auth.Post("/session/init", d.Session.Init)
 			auth.Get("/session/{nonce}", d.Session.Status)
 		}
-		// refresh, logout — Stage 1.4+.
+		// Ротация refresh-токена на новую пару.
+		if d.Token != nil {
+			auth.Post("/refresh", d.Token.Refresh)
+		}
+		// logout — Stage 1.5.
 	})
 
 	notFound := func(w http.ResponseWriter, req *http.Request) {

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/url"
 	"strings"
+	"time"
 
 	"bozor/pkg/shared/config"
 )
@@ -13,6 +14,12 @@ import (
 const dbName = "bozor_auth"
 
 const defaultAddr = ":8080"
+
+// Значения по умолчанию для TTL токенов (переопределяются env).
+const (
+	defaultAccessTTL  = 15 * time.Minute
+	defaultRefreshTTL = 720 * time.Hour // 30 дней
+)
 
 // Config — конфигурация Auth-сервиса.
 type Config struct {
@@ -34,6 +41,14 @@ type Config struct {
 	// RedisPassword — пароль Redis (пустой в dev).
 	RedisPassword string
 
+	// JWTSigningKey — секрет подписи access-JWT (HS256). Общий с gateway,
+	// который проверяет токены тем же ключом.
+	JWTSigningKey []byte
+	// JWTAccessTTL — время жизни access-токена.
+	JWTAccessTTL time.Duration
+	// JWTRefreshTTL — время жизни refresh-токена.
+	JWTRefreshTTL time.Duration
+
 	// TelegramWebhookSecret — ожидаемое значение заголовка
 	// X-Telegram-Bot-Api-Secret-Token во входящих вебхуках Telegram.
 	TelegramWebhookSecret string
@@ -47,7 +62,7 @@ type Config struct {
 
 // Load читает конфигурацию из окружения (fail-fast на обязательных ключах).
 func Load() (*Config, error) {
-	if missing := config.Missing("POSTGRES_USER", "POSTGRES_PASSWORD", "TELEGRAM_WEBHOOK_SECRET"); len(missing) > 0 {
+	if missing := config.Missing("POSTGRES_USER", "POSTGRES_PASSWORD", "TELEGRAM_WEBHOOK_SECRET", "JWT_SIGNING_KEY"); len(missing) > 0 {
 		return nil, fmt.Errorf("config: не заданы обязательные переменные: %s", strings.Join(missing, ", "))
 	}
 
@@ -67,6 +82,9 @@ func Load() (*Config, error) {
 		NATSURL:               config.String("NATS_URL", "nats://nats:4222"),
 		RedisAddr:             config.String("REDIS_ADDR", "redis:6379"),
 		RedisPassword:         config.String("REDIS_PASSWORD", ""),
+		JWTSigningKey:         []byte(config.String("JWT_SIGNING_KEY", "")),
+		JWTAccessTTL:          config.Duration("JWT_ACCESS_TTL", defaultAccessTTL),
+		JWTRefreshTTL:         config.Duration("JWT_REFRESH_TTL", defaultRefreshTTL),
 		TelegramWebhookSecret: config.String("TELEGRAM_WEBHOOK_SECRET", ""),
 		TelegramBotToken:      config.String("TELEGRAM_BOT_TOKEN", ""),
 		TelegramBotUsername:   config.String("TELEGRAM_BOT_USERNAME", ""),

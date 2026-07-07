@@ -12,16 +12,19 @@ func setRequired(t *testing.T) {
 	t.Setenv("POSTGRES_USER", "bozor")
 	t.Setenv("POSTGRES_PASSWORD", "secret")
 	t.Setenv("TELEGRAM_WEBHOOK_SECRET", "hook-secret")
+	t.Setenv("JWT_SIGNING_KEY", "test-signing-key")
 }
 
 func TestLoad_RequiresKeys(t *testing.T) {
 	t.Setenv("POSTGRES_USER", "")
 	t.Setenv("POSTGRES_PASSWORD", "")
 	t.Setenv("TELEGRAM_WEBHOOK_SECRET", "")
+	t.Setenv("JWT_SIGNING_KEY", "")
 	_, err := Load()
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "POSTGRES_USER")
 	assert.Contains(t, err.Error(), "TELEGRAM_WEBHOOK_SECRET")
+	assert.Contains(t, err.Error(), "JWT_SIGNING_KEY")
 }
 
 func TestLoad_DSNs(t *testing.T) {
@@ -35,6 +38,11 @@ func TestLoad_DSNs(t *testing.T) {
 	assert.Contains(t, cfg.AppDSN, "sslmode=disable")
 	assert.Equal(t, "hook-secret", cfg.TelegramWebhookSecret)
 	assert.Equal(t, ":8080", cfg.Addr)
+
+	// TTL токенов имеют разумные значения по умолчанию.
+	assert.Equal(t, defaultAccessTTL, cfg.JWTAccessTTL)
+	assert.Equal(t, defaultRefreshTTL, cfg.JWTRefreshTTL)
+	assert.Equal(t, []byte("test-signing-key"), cfg.JWTSigningKey)
 }
 
 func TestLoad_HostOverrides(t *testing.T) {

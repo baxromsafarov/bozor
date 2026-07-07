@@ -17,6 +17,7 @@ import (
 
 	"github.com/redis/go-redis/v9"
 
+	"bozor/pkg/shared/authx"
 	"bozor/pkg/shared/events"
 	"bozor/pkg/shared/httpx"
 	"bozor/pkg/shared/logging"
@@ -118,15 +119,21 @@ func run() error {
 	defer wg.Wait() // дождаться завершения relay до nc.Close (defer LIFO)
 
 	userRepo := repo.NewUserRepo(pool)
+	refreshRepo := repo.NewRefreshRepo(pool)
+	signer := authx.NewSigner(cfg.JWTSigningKey, serviceName, cfg.JWTAccessTTL)
+	tokenSvc := app.NewTokenService(signer, refreshRepo, cfg.JWTRefreshTTL)
+
 	svc := app.NewService(userRepo)
 	bot := telegram.New(cfg.TelegramBotToken)
 	webhook := transport.NewWebhookHandler(cfg.TelegramWebhookSecret, svc, bot, sessions, log)
-	sessionHandler := transport.NewSessionHandler(sessions, cfg.TelegramBotUsername, log)
+	sessionHandler := transport.NewSessionHandler(sessions, tokenSvc, cfg.TelegramBotUsername, log)
+	tokenHandler := transport.NewTokenHandler(tokenSvc, log)
 
 	router := transport.NewRouter(transport.Deps{
 		Log:            log,
 		Webhook:        webhook,
 		Session:        sessionHandler,
+		Token:          tokenHandler,
 		MetricsHandler: metricsHandler,
 		ReadyChecks: map[string]httpx.Check{
 			"postgres": pool.Ping,

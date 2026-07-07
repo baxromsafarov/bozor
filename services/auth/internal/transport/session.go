@@ -22,18 +22,21 @@ var nonceRe = regexp.MustCompile(`^[0-9a-f]{32}$`)
 type SessionStore interface {
 	Init(ctx context.Context) (nonce string, ttl time.Duration, err error)
 	Get(ctx context.Context, nonce string) (session.Session, error)
+	Consume(ctx context.Context, nonce string) (session.Session, error)
 }
 
 // SessionHandler обслуживает инициацию входа и опрос его статуса по nonce.
+// При подтверждённом входе выдаёт пару токенов (завершение логина).
 type SessionHandler struct {
 	sessions    SessionStore
+	tokens      Tokens
 	botUsername string // username бота для сборки deep-link
 	log         *slog.Logger
 }
 
 // NewSessionHandler создаёт обработчик сессий логина.
-func NewSessionHandler(sessions SessionStore, botUsername string, log *slog.Logger) *SessionHandler {
-	return &SessionHandler{sessions: sessions, botUsername: botUsername, log: log}
+func NewSessionHandler(sessions SessionStore, tokens Tokens, botUsername string, log *slog.Logger) *SessionHandler {
+	return &SessionHandler{sessions: sessions, tokens: tokens, botUsername: botUsername, log: log}
 }
 
 type initResponse struct {
@@ -59,11 +62,21 @@ func (h *SessionHandler) Init(w http.ResponseWriter, r *http.Request) {
 }
 
 type statusResponse struct {
-	Status string `json:"status"`            // pending | confirmed | expired
-	UserID string `json:"user_id,omitempty"` // заполнен только при confirmed
+	Status string `json:"status"` // pending | confirmed | expired
+	UserID string `json:"user_id,omitempty"`
+
+	// Токены присутствуют только при первом confirmed-опросе (см. Status).
+	AccessToken  string `json:"access_token,omitempty"`
+	RefreshToken string `json:"refresh_token,omitempty"`
+	TokenType    string `json:"token_type,omitempty"`
+	ExpiresIn    int    `json:"expires_in,omitempty"`
+	DeviceID     string `json:"device_id,omitempty"`
 }
 
-// Status отдаёт текущий статус логина по nonce (pending/confirmed/expired).
+// Status отдаёт текущий статус логина по nonce. При confirmed завершает вход:
+// одноразово (Consume) выдаёт пару токенов и удаляет nonce. Необязательный
+// query-параметр device_id привязывает refresh-токен к устройству; при
+// отсутствии генерируется и возвращается новый идентификатор.
 func (h *SessionHandler) Status(w http.ResponseWriter, r *http.Request) {
 	nonce := chi.URLParam(r, "nonce")
 	if !nonceRe.MatchString(nonce) {
@@ -71,6 +84,7 @@ func (h *SessionHandler) Status(w http.ResponseWriter, r *http.Request) {
 			"Некорректный идентификатор сессии", "Yaroqsiz sessiya identifikatori"))
 		return
 	}
+
 	sess, err := h.sessions.Get(r.Context(), nonce)
 	if err != nil {
 		h.log.ErrorContext(r.Context(), "опрос логин-сессии", slog.String("error", err.Error()))
@@ -78,7 +92,47 @@ func (h *SessionHandler) Status(w http.ResponseWriter, r *http.Request) {
 			"Не удалось получить статус", "Holatni olib bo'lmadi"))
 		return
 	}
-	httpx.Respond(w, http.StatusOK, statusResponse{Status: sess.Status, UserID: sess.UserID})
+	if sess.Status != session.StatusConfirmed {
+		httpx.Respond(w, http.StatusOK, statusResponse{Status: sess.Status})
+		return
+	}
+
+	// Валидация device_id до потребления nonce, чтобы не «сжечь» его на 4xx.
+	deviceID := r.URL.Query().Get("device_id")
+	if deviceID != "" && !deviceIDRe.MatchString(deviceID) {
+		httpx.WriteProblem(w, r, apperr.New(apperr.KindInvalid, "invalid_device_id",
+			"Некорректный идентификатор устройства", "Yaroqsiz qurilma identifikatori"))
+		return
+	}
+
+	// Одноразовое завершение входа: забираем nonce атомарно.
+	consumed, err := h.sessions.Consume(r.Context(), nonce)
+	if err != nil {
+		h.log.ErrorContext(r.Context(), "consume логин-сессии", slog.String("error", err.Error()))
+		httpx.WriteProblem(w, r, apperr.New(apperr.KindInternal, "session_status_failed",
+			"Не удалось получить статус", "Holatni olib bo'lmadi"))
+		return
+	}
+	if consumed.Status != session.StatusConfirmed || consumed.UserID == "" {
+		// Гонку выиграл другой опрос — токены уже выданы.
+		httpx.Respond(w, http.StatusOK, statusResponse{Status: session.StatusExpired})
+		return
+	}
+
+	pair, err := h.tokens.IssueForUser(r.Context(), consumed.UserID, deviceID)
+	if err != nil {
+		httpx.WriteProblem(w, r, err)
+		return
+	}
+	httpx.Respond(w, http.StatusOK, statusResponse{
+		Status:       session.StatusConfirmed,
+		UserID:       pair.UserID,
+		AccessToken:  pair.AccessToken,
+		RefreshToken: pair.RefreshToken,
+		TokenType:    pair.TokenType,
+		ExpiresIn:    pair.ExpiresIn,
+		DeviceID:     pair.DeviceID,
+	})
 }
 
 // deepLink собирает ссылку t.me/<bot>?start=<nonce>. Пустой username (бот не

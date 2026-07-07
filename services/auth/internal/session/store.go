@@ -153,6 +153,25 @@ func (s *Store) Get(ctx context.Context, nonce string) (Session, error) {
 	return sess, nil
 }
 
+// Consume атомарно читает и удаляет nonce (GETDEL): используется, когда клиент
+// забирает подтверждённый вход — результат отдаётся ровно один раз (одноразовость),
+// а гонку двух опросов выигрывает только первый (второй получит StatusExpired).
+// Отсутствие ключа отдаётся как StatusExpired.
+func (s *Store) Consume(ctx context.Context, nonce string) (Session, error) {
+	raw, err := s.rdb.GetDel(ctx, nonceKey(nonce)).Bytes()
+	if errors.Is(err, redis.Nil) {
+		return Session{Status: StatusExpired}, nil
+	}
+	if err != nil {
+		return Session{}, fmt.Errorf("session: consume nonce: %w", err)
+	}
+	var sess Session
+	if err := json.Unmarshal(raw, &sess); err != nil {
+		return Session{}, fmt.Errorf("session: разбор nonce: %w", err)
+	}
+	return sess, nil
+}
+
 func (s *Store) get(ctx context.Context, nonce string) (Session, error) {
 	raw, err := s.rdb.Get(ctx, nonceKey(nonce)).Bytes()
 	if errors.Is(err, redis.Nil) {
