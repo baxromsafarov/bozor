@@ -15,6 +15,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/redis/go-redis/v9"
+
 	"bozor/pkg/shared/events"
 	"bozor/pkg/shared/grpcx"
 	"bozor/pkg/shared/httpx"
@@ -30,6 +32,7 @@ import (
 	"bozor/services/listing/internal/config"
 	"bozor/services/listing/internal/repo"
 	"bozor/services/listing/internal/transport"
+	"bozor/services/listing/internal/views"
 	"bozor/services/listing/internal/worker"
 	"bozor/services/listing/migrations"
 )
@@ -92,6 +95,11 @@ func run() error {
 	}
 	defer func() { _ = catalogConn.Close() }()
 
+	// Redis: буфер счётчика просмотров (Stage 3.5).
+	rdb := redis.NewClient(&redis.Options{Addr: cfg.RedisAddr, Password: cfg.RedisPassword})
+	defer func() { _ = rdb.Close() }()
+	viewCounter := views.NewCounter(rdb)
+
 	// NATS JetStream + relay: события bozor.ad.* из outbox в шину.
 	nc, js, err := natsx.Connect(cfg.NATSURL, serviceName)
 	if err != nil {
@@ -139,7 +147,17 @@ func run() error {
 		}
 	}()
 
-	svc := app.NewService(adRepo, catalogclient.New(catalogConn), cfg.AdTTL, log)
+	// Воркер флеша просмотров: буфер Redis → ads.views_count пачкой (Stage 3.5).
+	viewFlusher := worker.NewViewFlusher(adRepo, viewCounter, cfg.ViewsFlushInterval, log)
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		if err := viewFlusher.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
+			log.Error("воркер флеша просмотров остановлен с ошибкой", slog.String("error", err.Error()))
+		}
+	}()
+
+	svc := app.NewService(adRepo, catalogclient.New(catalogConn), viewCounter, cfg.AdTTL, log)
 	handler := transport.NewHandler(svc, log)
 
 	router := transport.NewRouter(transport.Deps{
@@ -148,6 +166,7 @@ func run() error {
 		MetricsHandler: metricsHandler,
 		ReadyChecks: map[string]httpx.Check{
 			"postgres": pool.Ping,
+			"redis":    func(ctx context.Context) error { return rdb.Ping(ctx).Err() },
 			"nats": func(context.Context) error {
 				if !nc.IsConnected() {
 					return errors.New("nats: нет соединения")

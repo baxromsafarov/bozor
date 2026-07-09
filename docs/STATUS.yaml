@@ -1,13 +1,17 @@
-status_id: "20260709-141500"
+status_id: "20260709-144500"
 project: "Bozor"
 version: "1.0"
 
 current:
   chapter: "3"                     # CHAPTER 3: Listings & Media
-  stage: "3.5"                     # STAGE 3.5: счётчик просмотров (буфер в Redis + периодический флеш)
+  stage: "3.6"                     # STAGE 3.6: API объявлений + outbox-события (POST/GET/PATCH/DELETE, лента, me/ads)
   status: "not_started"
 
 completed:
+  - stage_id: "3.5"
+    title: "Listing: асинхронный счётчик просмотров — буфер в Redis (Lua-drain) + пакетный флеш в PostgreSQL"
+    completed_date: "2026-07-09"
+    evidence: "Счётчик просмотров без write-hotspot (ADR-021). Пакет internal/views (Counter поверх redis.Cmdable): Incr (HINCRBY хэша listing:views), Buffered (HGET→int64, redis.Nil→0), Drain (Lua HGETALL+DEL одним EVAL — атомарный снимок+обнуление, инкременты после снятия попадают в новый ключ и не теряются; парс плоского массива в map), Restore (HINCRBY пачкой — best-effort откат). repo.AddViews(map[ad_id]delta): один batch-UPDATE ads … FROM (VALUES …) (несуществующие id молча отброшены, пустая карта no-op). app.Service += ViewCounter (может быть nil); Get учитывает просмотр best-effort (Incr + добавление Buffered к персистентному views_count — near-real-time), сбой Redis логируется, но не ломает чтение. worker.ViewFlusher: тикер LISTING_VIEWS_FLUSH_INTERVAL → Drain→AddViews→(при ошибке БД) Restore + повтор на следующем тике. transport: adResponse += views_count. main: redis.NewClient, viewCounter, goroutine ViewFlusher, readyz += ping redis. config/compose/.env(.example): REDIS_ADDR/REDIS_PASSWORD/LISTING_VIEWS_FLUSH_INTERVAL(30s); listing-ads depends_on redis healthy. Тесты: unit app (Get инкрементирует буфер и добавляет буферизованные к views_count; сбой счётчика best-effort — чтение не падает; nil-счётчик ок), worker (ViewFlusher flush пишет пачкой/пустой буфер no-op/ошибка БД→Restore/ошибка снятия→без записи) + integration на testcontainers redis:8 (Incr×2→Buffered=2, missing→0, Drain снимает {ad:2,ad2:1}+обнуляет, повторный Drain пусто; Restore восстанавливает+инкремент продолжает; Drain сохраняет конкурентные инкременты) + integration на testcontainers postgres (AddViews batch: 3/5 применены, несуществующий отброшен, повтор аккумулирует, nil no-op) — go test PASS (default + integration repo 19.9s/redis ~5s); golangci-lint 0 issues (default+integration); gofmt чисто; go work sync — все 7 модулей зелёные. Живая проверка (listing-ads healthy, readyz ready с redis-check, флеш-интервал 5s на время проверки): создан ad (cars), 3× GET /ads/{id} → views_count 1/2/3 из буфера, Redis HGET listing:views=3, при этом ads.views_count в БД=0 (нет write-hotspot: GET не пишет в БД); через ~6s флеш → ads.views_count=3, Redis-буфер очищен, лог 'просмотры слиты в БД ads=1'; следующий GET=4 (персистентное 3 + буфер 1 — аккумуляция через флеш корректна); интервал возвращён к 30s"
   - stage_id: "3.4"
     title: "Listing: жизненный цикл объявления — статусная машина, консьюмер решений модерации (inbox), воркер истечения"
     completed_date: "2026-07-09"
@@ -87,8 +91,8 @@ completed:
     evidence: "services/location (модуль bozor/services/location в go.work). Миграции: 00001 схема (regions: id smallint PK, slug UNIQUE, name_uz/name_ru, lat/lon, sort_order; cities: id PK, region_id FK ON DELETE CASCADE, slug UNIQUE, имена/гео/sort, индекс по region_id,sort_order) + 00002 идемпотентный сид (ADR-007, ON CONFLICT DO UPDATE): 14 первичных регионов (12 областей + г.Ташкент + Респ. Каракалпакстан) и 56 городов/районов с реальными координатами WGS84 — включая 12 районов Ташкента и по 2–4 города на регион (апострофы в узбекских названиях экранированы: Farg'ona, Qo'qon, Qoraqalpog'iston и т.д.). Слой: domain (Region/City, lat/lon *float64, ErrRegionNotFound), repo (Regions/CitiesByRegion/RegionExists через pgx, ORDER BY sort_order), app (Service; Cities → 404 при несуществующем регионе, пустой список = регион без городов), transport (chi + middleware pkg/shared, GET /api/v1/locations/regions, GET /api/v1/locations/regions/{id}/cities; 422 на нечисловой id). Config: только DSN (app→PgBouncer, migrate→Postgres напрямую, ADR-013). Миграции при старте через pkg/shared/migrate. Dockerfile build-local go.work → distroless nonroot, healthcheck /location -health. Compose: сервис location + dev-порт 8082 + scrape-job prometheus. Тесты: unit (config DSN, transport regions/cities/404/422/not-found) + integration на testcontainers postgres (14 регионов, 56 городов, 12 районов Ташкента, апостроф Farg'ona, RegionExists, пустой список для чужого региона) — go test -tags=integration PASS (6.7s); golangci-lint 0 issues (default+integration). Живая проверка (15 контейнеров): миграции applied=2, рестарт→applied=0 (идемпотентно); /readyz ready; напрямую и через gateway (routing /api/v1/locations→location): 14 регионов (первый — г.Ташкент), 12 районов Ташкента, апостроф Farg'ona корректен, Самарканд/Каттакурган/Ургут; 404 неизвестный регион, 422 нечисловой id; Prometheus up{job=location}=1"
 
 next_actions:
-  - "Stage 3.5: счётчик просмотров — буфер в Redis (INCR по ad_id) + периодический флеш в БД батчем (без write-hotspot)"
-  - "Stage 3.6: API объявлений + outbox-события — POST/GET/PATCH/DELETE /ads, лента GET /ads, GET /me/ads; правка активного → повторная модерация (active→pending); полный набор bozor.ad.* (sold/renew уже доставлены в 3.4)"
+  - "Stage 3.6: API объявлений + outbox-события — POST/GET/PATCH/DELETE /ads, лента GET /ads, GET /me/ads; правка активного → повторная модерация (active→pending); полный набор bozor.ad.* (sold/renew/submit/archive и счётчик просмотров уже доставлены в 3.4/3.5)"
+  - "CHAPTER 4 (Search): Stage 4.1 — Search-сервис + схема коллекции Typesense (ads: title/description uz/ru, category_path, регион/город, цена, attrs фасеты, is_top, geo)"
 
 decisions:                         # краткие ссылки; полные ADR — в DECISIONS.md
   - decision: "Брокер — NATS JetStream (не Kafka) ради лёгкости на Compose"
@@ -143,6 +147,10 @@ decisions:                         # краткие ссылки; полные A
     rationale: "Правила переходов в одном месте (domain), условный UPDATE WHERE status=$from защищает от гонок; inbox processed_events + guard status=pending дают exactly-once на bozor.ad.approved|rejected; события источника истины (updated/sold/expired) в шину транзакционно через outbox; воркеры в процессе сервиса (как Media, ADR-018)"
     date: "2026-07-09"
     alternatives: ["Отдельный worker-деплой", "Активация без inbox (только guard)", "pg_cron для истечения"]
+  - decision: "Счётчик просмотров — буфер в Redis (хэш listing:views + атомарный Lua HGETALL+DEL), пакетный флеш в БД, чтение с учётом буфера (ADR-021)"
+    rationale: "Устраняет write-hotspot одиночных UPDATE популярной карточки; атомарный снимок всего буфера одним EVAL без потери инкрементов; batch-UPDATE FROM VALUES; near-real-time чтение (персистентное+буфер); best-effort к сбоям Redis (fail-open чтение) и БД (Restore+повтор)"
+    date: "2026-07-09"
+    alternatives: ["Ключ на объявление + GETDEL", "Прямой UPDATE на каждый просмотр", "Отдельный POST /ads/{id}/view"]
 
 open_questions: []
 
@@ -159,10 +167,10 @@ tech_stack:
   deploy: ["Docker Compose", "nginx"]
 
 metrics:
-  completed_stages: 19
+  completed_stages: 20
   total_stages: 52
-  completion_percentage: 37
-  estimated_remaining_stages: 33
-  chapters_completed: ["0", "1", "2"]   # CHAPTER 0, 1, 2 завершены; CHAPTER 3 в работе — 3.1 (upload) + 3.2 (обработка) + 3.3 (модель+gRPC) + 3.4 (жизненный цикл) готовы
+  completion_percentage: 38
+  estimated_remaining_stages: 32
+  chapters_completed: ["0", "1", "2"]   # CHAPTER 0, 1, 2 завершены; CHAPTER 3 в работе — 3.1 (upload) + 3.2 (обработка) + 3.3 (модель+gRPC) + 3.4 (жизненный цикл) + 3.5 (просмотры) готовы; остаётся 3.6 (API+события)
 
 notes: "Backend-only, фронтенда нет. Целевая нагрузка: десятки тысяч DAU. Автономный режим работы подтверждён заказчиком. Коммиты — от имени baxromsafarov. Окружение: Windows 11, Go 1.26.4, Docker Desktop 29.2.1 + Compose v5, golangci-lint 2.12.2, goose, buf. Нюанс: локально go test без -race (нет cgo на Windows); -race выполняется в CI на Ubuntu. goconst min-occurrences=5. Инфра-нюансы (Stage 0.3): postgres:18 монтирует /var/lib/postgresql (не .../data); healthcheck typesense — через bash /dev/tcp (нет curl/wget/nc в образе). Локальный .env создаётся из .env.example (gitignore)."

@@ -429,14 +429,19 @@ services:
       PGBOUNCER_PORT: ${PGBOUNCER_PORT}
       NATS_URL: ${NATS_URL}
       CATALOG_GRPC_ADDR: catalog:9090       # валидация атрибутов против Catalog (gRPC)
+      REDIS_ADDR: ${REDIS_ADDR}             # буфер счётчика просмотров
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
       LISTING_AD_TTL: ${LISTING_AD_TTL}                 # срок активного объявления (renew продлевает)
       LISTING_EXPIRE_INTERVAL: ${LISTING_EXPIRE_INTERVAL} # период воркера истечения
       LISTING_EXPIRE_BATCH: ${LISTING_EXPIRE_BATCH}     # размер пакета истечения
+      LISTING_VIEWS_FLUSH_INTERVAL: ${LISTING_VIEWS_FLUSH_INTERVAL} # период флеша просмотров в БД
       OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT}
     depends_on:
       postgres:
         condition: service_healthy
       pgbouncer:
+        condition: service_healthy
+      redis:                 # буфер счётчика просмотров
         condition: service_healthy
       nats:                  # publish bozor.ad.* из outbox
         condition: service_healthy

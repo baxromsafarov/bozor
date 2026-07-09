@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -194,6 +195,36 @@ func (r *Repo) ExpireWithEvent(ctx context.Context, adID string, ev events.Envel
 		return outbox.Enqueue(ctx, tx, ev)
 	})
 	return expired, err
+}
+
+// AddViews прибавляет накопленные просмотры к объявлениям одним batch-UPDATE
+// (id → дельта). Несуществующие объявления просто не совпадают и отбрасываются.
+// Устраняет write-hotspot: поток просмотров популярной карточки сливается пачкой.
+func (r *Repo) AddViews(ctx context.Context, counts map[string]int64) error {
+	if len(counts) == 0 {
+		return nil
+	}
+	values := make([]string, 0, len(counts))
+	args := make([]any, 0, len(counts)*2)
+	i := 1
+	for adID, delta := range counts {
+		if delta == 0 {
+			continue
+		}
+		values = append(values, fmt.Sprintf("($%d::uuid, $%d::bigint)", i, i+1))
+		args = append(args, adID, delta)
+		i += 2
+	}
+	if len(values) == 0 {
+		return nil
+	}
+	sql := `UPDATE ads AS a SET views_count = a.views_count + v.delta
+		FROM (VALUES ` + strings.Join(values, ",") + `) AS v(id, delta)
+		WHERE a.id = v.id`
+	if _, err := r.pool.Exec(ctx, sql, args...); err != nil {
+		return fmt.Errorf("repo: флеш просмотров: %w", err)
+	}
+	return nil
 }
 
 // GetByID возвращает объявление со значениями атрибутов и изображениями.

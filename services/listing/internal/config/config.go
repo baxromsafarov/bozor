@@ -22,6 +22,9 @@ const (
 	defaultExpireBatch    = 100                 // сколько объявлений истекает за проход
 )
 
+// defaultViewsFlushInterval — период флеша буфера просмотров из Redis в БД (Stage 3.5).
+const defaultViewsFlushInterval = 30 * time.Second
+
 // Config — конфигурация Listing-сервиса.
 type Config struct {
 	Addr     string
@@ -39,10 +42,17 @@ type Config struct {
 	// CatalogGRPCAddr — адрес gRPC Catalog для валидации атрибутов.
 	CatalogGRPCAddr string
 
+	// RedisAddr/RedisPassword — Redis для буфера счётчика просмотров (Stage 3.5).
+	RedisAddr     string
+	RedisPassword string
+
 	// Жизненный цикл объявлений (Stage 3.4).
 	AdTTL          time.Duration // срок активного объявления
 	ExpireInterval time.Duration // период воркера истечения
 	ExpireBatch    int           // размер пакета истечения
+
+	// ViewsFlushInterval — период флеша буфера просмотров в БД (Stage 3.5).
+	ViewsFlushInterval time.Duration
 }
 
 // Load читает конфигурацию из окружения (fail-fast на обязательных ключах).
@@ -64,11 +74,14 @@ func Load() (*Config, error) {
 		MigrateDSN: dsn(user, pass,
 			config.String("POSTGRES_HOST", "postgres"),
 			config.String("POSTGRES_PORT", "5432")),
-		NATSURL:         config.String("NATS_URL", "nats://nats:4222"),
-		CatalogGRPCAddr: config.String("CATALOG_GRPC_ADDR", "catalog:9090"),
-		AdTTL:           config.Duration("LISTING_AD_TTL", defaultAdTTL),
-		ExpireInterval:  config.Duration("LISTING_EXPIRE_INTERVAL", defaultExpireInterval),
-		ExpireBatch:     config.Int("LISTING_EXPIRE_BATCH", defaultExpireBatch),
+		NATSURL:            config.String("NATS_URL", "nats://nats:4222"),
+		CatalogGRPCAddr:    config.String("CATALOG_GRPC_ADDR", "catalog:9090"),
+		RedisAddr:          config.String("REDIS_ADDR", "redis:6379"),
+		RedisPassword:      config.String("REDIS_PASSWORD", ""),
+		AdTTL:              config.Duration("LISTING_AD_TTL", defaultAdTTL),
+		ExpireInterval:     config.Duration("LISTING_EXPIRE_INTERVAL", defaultExpireInterval),
+		ExpireBatch:        config.Int("LISTING_EXPIRE_BATCH", defaultExpireBatch),
+		ViewsFlushInterval: config.Duration("LISTING_VIEWS_FLUSH_INTERVAL", defaultViewsFlushInterval),
 	}, nil
 }
 

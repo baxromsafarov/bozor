@@ -62,6 +62,21 @@ func (f *fakeCatalog) EffectiveAttributes(_ context.Context, _ string) ([]domain
 	return f.specs, f.err
 }
 
+type fakeViews struct {
+	incred   []string
+	buffered int64
+	incrErr  error
+}
+
+func (f *fakeViews) Incr(_ context.Context, adID string) error {
+	f.incred = append(f.incred, adID)
+	return f.incrErr
+}
+
+func (f *fakeViews) Buffered(_ context.Context, _ string) (int64, error) {
+	return f.buffered, nil
+}
+
 func validInput() CreateInput {
 	return CreateInput{
 		UserID: "user-1", CategoryID: "cat-cars", Title: "BMW X5", Price: 500000000,
@@ -79,7 +94,7 @@ func carsCatalog() *fakeCatalog {
 
 func TestCreate_HappyPath(t *testing.T) {
 	store := &fakeStore{}
-	ad, err := NewService(store, carsCatalog(), 720*time.Hour, discardLogger()).Create(context.Background(), validInput())
+	ad, err := NewService(store, carsCatalog(), nil, 720*time.Hour, discardLogger()).Create(context.Background(), validInput())
 	require.NoError(t, err)
 	assert.NotEmpty(t, ad.ID)
 	assert.Equal(t, domain.StatusDraft, ad.Status)
@@ -92,7 +107,7 @@ func TestCreate_HappyPath(t *testing.T) {
 func TestCreate_CategoryNotFound(t *testing.T) {
 	store := &fakeStore{}
 	cat := &fakeCatalog{err: ErrCategoryNotFound}
-	_, err := NewService(store, cat, 720*time.Hour, discardLogger()).Create(context.Background(), validInput())
+	_, err := NewService(store, cat, nil, 720*time.Hour, discardLogger()).Create(context.Background(), validInput())
 	assert.ErrorIs(t, err, ErrCategoryNotFound)
 	assert.Nil(t, store.created, "невалидная категория — объявление не создаётся")
 }
@@ -100,41 +115,41 @@ func TestCreate_CategoryNotFound(t *testing.T) {
 func TestCreate_UnknownAttributeRejected(t *testing.T) {
 	in := validInput()
 	in.Attributes = append(in.Attributes, domain.AdAttributeValue{AttributeSlug: "color", Value: "red"})
-	_, err := NewService(&fakeStore{}, carsCatalog(), 720*time.Hour, discardLogger()).Create(context.Background(), in)
+	_, err := NewService(&fakeStore{}, carsCatalog(), nil, 720*time.Hour, discardLogger()).Create(context.Background(), in)
 	assert.ErrorIs(t, err, domain.ErrUnknownAttribute)
 }
 
 func TestCreate_MissingRequiredAttributeRejected(t *testing.T) {
 	in := validInput()
 	in.Attributes = nil // brand обязателен
-	_, err := NewService(&fakeStore{}, carsCatalog(), 720*time.Hour, discardLogger()).Create(context.Background(), in)
+	_, err := NewService(&fakeStore{}, carsCatalog(), nil, 720*time.Hour, discardLogger()).Create(context.Background(), in)
 	assert.ErrorIs(t, err, domain.ErrMissingRequiredAttr)
 }
 
 func TestCreate_InvalidEnumValueRejected(t *testing.T) {
 	in := validInput()
 	in.Attributes = []domain.AdAttributeValue{{AttributeSlug: "brand", Value: "lada"}}
-	_, err := NewService(&fakeStore{}, carsCatalog(), 720*time.Hour, discardLogger()).Create(context.Background(), in)
+	_, err := NewService(&fakeStore{}, carsCatalog(), nil, 720*time.Hour, discardLogger()).Create(context.Background(), in)
 	assert.ErrorIs(t, err, domain.ErrInvalidAttrValue)
 }
 
 func TestCreate_CoreValidation(t *testing.T) {
 	in := validInput()
 	in.Title = ""
-	_, err := NewService(&fakeStore{}, carsCatalog(), 720*time.Hour, discardLogger()).Create(context.Background(), in)
+	_, err := NewService(&fakeStore{}, carsCatalog(), nil, 720*time.Hour, discardLogger()).Create(context.Background(), in)
 	assert.ErrorIs(t, err, domain.ErrEmptyTitle)
 }
 
 func TestCreate_TooManyImagesRejected(t *testing.T) {
 	in := validInput()
 	in.Images = make([]domain.AdImage, domain.MaxImages+1)
-	_, err := NewService(&fakeStore{}, carsCatalog(), 720*time.Hour, discardLogger()).Create(context.Background(), in)
+	_, err := NewService(&fakeStore{}, carsCatalog(), nil, 720*time.Hour, discardLogger()).Create(context.Background(), in)
 	assert.ErrorIs(t, err, domain.ErrTooManyImages)
 }
 
 // lifecycleSvc — сервис для действий жизненного цикла (каталог не задействован).
 func lifecycleSvc(store Store) *Service {
-	return NewService(store, nil, 720*time.Hour, discardLogger())
+	return NewService(store, nil, nil, 720*time.Hour, discardLogger())
 }
 
 func adWith(status domain.Status) *domain.Ad {
@@ -231,3 +246,34 @@ func TestArchive_HappyPath(t *testing.T) {
 	require.Len(t, store.events, 1)
 	assert.Equal(t, events.SubjectAdUpdated, store.events[0].Type)
 }
+
+func TestGet_RecordsViewAndAugments(t *testing.T) {
+	store := &fakeStore{getResult: adWith(domain.StatusActive)} // персистентно views_count=0
+	vc := &fakeViews{buffered: 7}
+	ad, err := NewService(store, nil, vc, 720*time.Hour, discardLogger()).Get(context.Background(), "ad-1")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"ad-1"}, vc.incred, "просмотр учтён в буфере")
+	assert.Equal(t, int64(7), ad.ViewsCount, "к персистентному счётчику добавлены буферизованные просмотры")
+}
+
+func TestGet_ViewCounterFailureIsBestEffort(t *testing.T) {
+	store := &fakeStore{getResult: adWith(domain.StatusActive)}
+	vc := &fakeViews{incrErr: assertErr}
+	ad, err := NewService(store, nil, vc, 720*time.Hour, discardLogger()).Get(context.Background(), "ad-1")
+	require.NoError(t, err, "сбой счётчика не ломает чтение")
+	assert.Equal(t, "ad-1", ad.ID)
+}
+
+func TestGet_NilViewsOK(t *testing.T) {
+	store := &fakeStore{getResult: adWith(domain.StatusActive)}
+	ad, err := NewService(store, nil, nil, 720*time.Hour, discardLogger()).Get(context.Background(), "ad-1")
+	require.NoError(t, err)
+	assert.Equal(t, "ad-1", ad.ID)
+	assert.Equal(t, int64(0), ad.ViewsCount)
+}
+
+var assertErr = errStub("boom")
+
+type errStub string
+
+func (e errStub) Error() string { return string(e) }

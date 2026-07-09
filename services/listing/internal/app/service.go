@@ -36,18 +36,28 @@ type CatalogValidator interface {
 	EffectiveAttributes(ctx context.Context, categoryID string) ([]domain.AttrSpec, error)
 }
 
+// ViewCounter буферизует просмотры объявлений (реализуется views.Counter).
+// Инкремент/чтение — best-effort: недоступность Redis не должна ломать чтение
+// объявления. nil-реализация отключает счётчик.
+type ViewCounter interface {
+	Incr(ctx context.Context, adID string) error
+	Buffered(ctx context.Context, adID string) (int64, error)
+}
+
 // Service — use-cases объявлений.
 type Service struct {
 	store   Store
 	catalog CatalogValidator
+	views   ViewCounter
 	adTTL   time.Duration
 	log     *slog.Logger
 }
 
 // NewService создаёт сервис объявлений. adTTL — срок активного объявления
 // (используется при продлении renew; активация из модерации задаёт срок в воркере).
-func NewService(store Store, catalog CatalogValidator, adTTL time.Duration, log *slog.Logger) *Service {
-	return &Service{store: store, catalog: catalog, adTTL: adTTL, log: log}
+// views может быть nil (счётчик просмотров отключён).
+func NewService(store Store, catalog CatalogValidator, views ViewCounter, adTTL time.Duration, log *slog.Logger) *Service {
+	return &Service{store: store, catalog: catalog, views: views, adTTL: adTTL, log: log}
 }
 
 // CreateInput — входные данные создания объявления.
@@ -114,9 +124,33 @@ func (s *Service) Create(ctx context.Context, in CreateInput) (domain.Ad, error)
 	return ad, nil
 }
 
-// Get возвращает объявление по id.
+// Get возвращает объявление по id и учитывает его просмотр: инкрементирует
+// буфер в Redis и добавляет ещё не слитые просмотры к персистентному счётчику
+// (near-real-time). Счётчик — best-effort: сбой Redis не мешает чтению.
 func (s *Service) Get(ctx context.Context, id string) (domain.Ad, error) {
-	return s.store.GetByID(ctx, id)
+	ad, err := s.store.GetByID(ctx, id)
+	if err != nil {
+		return domain.Ad{}, err
+	}
+	s.recordView(ctx, &ad)
+	return ad, nil
+}
+
+// recordView учитывает просмотр объявления (best-effort): +1 в буфер и
+// добавление буферизованных просмотров к персистентному значению.
+func (s *Service) recordView(ctx context.Context, ad *domain.Ad) {
+	if s.views == nil {
+		return
+	}
+	if err := s.views.Incr(ctx, ad.ID); err != nil {
+		s.log.WarnContext(ctx, "счётчик просмотров: инкремент", slog.String("error", err.Error()))
+	}
+	buffered, err := s.views.Buffered(ctx, ad.ID)
+	if err != nil {
+		s.log.WarnContext(ctx, "счётчик просмотров: чтение буфера", slog.String("error", err.Error()))
+		return
+	}
+	ad.ViewsCount += buffered
 }
 
 // SubmitForModeration отправляет объявление на модерацию (draft|rejected →

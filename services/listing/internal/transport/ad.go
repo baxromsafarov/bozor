@@ -83,6 +83,7 @@ type adResponse struct {
 	Lng          *float64       `json:"lng,omitempty"`
 	Status       string         `json:"status"`
 	PhoneDisplay bool           `json:"phone_display"`
+	ViewsCount   int64          `json:"views_count"`
 	Attributes   []attributeDTO `json:"attributes"`
 	Images       []imageDTO     `json:"images"`
 	PublishedAt  string         `json:"published_at,omitempty"`
@@ -183,7 +184,7 @@ func toResponse(a domain.Ad) adResponse {
 	resp := adResponse{
 		ID: a.ID, UserID: a.UserID, CategoryID: a.CategoryID, Title: a.Title, Description: a.Description,
 		Price: a.Price, Currency: a.Currency, RegionID: a.RegionID, CityID: a.CityID, Lat: a.Lat, Lng: a.Lng,
-		Status: string(a.Status), PhoneDisplay: a.PhoneDisplay,
+		Status: string(a.Status), PhoneDisplay: a.PhoneDisplay, ViewsCount: a.ViewsCount,
 		Attributes:  make([]attributeDTO, 0, len(a.Attributes)),
 		Images:      make([]imageDTO, 0, len(a.Images)),
 		PublishedAt: formatTime(a.PublishedAt),

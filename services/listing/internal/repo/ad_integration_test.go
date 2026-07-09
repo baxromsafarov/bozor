@@ -141,6 +141,34 @@ func TestListingRepo_ApplyModeration_Idempotent(t *testing.T) {
 	assert.Equal(t, 1, countSubject(t, ctx, pool, events.SubjectAdUpdated), "повтор не публикует событие второй раз")
 }
 
+func TestListingRepo_AddViews(t *testing.T) {
+	ctx := context.Background()
+	pool := startDB(t)
+	r := repo.NewRepo(pool)
+
+	a1 := seedAd(t, ctx, r, domain.StatusActive, nil)
+	a2 := seedAd(t, ctx, r, domain.StatusActive, nil)
+
+	// Batch-флеш: несуществующий id молча отбрасывается.
+	require.NoError(t, r.AddViews(ctx, map[string]int64{a1.ID: 3, a2.ID: 5, newID(t): 9}))
+
+	got1, err := r.GetByID(ctx, a1.ID)
+	require.NoError(t, err)
+	assert.Equal(t, int64(3), got1.ViewsCount)
+	got2, err := r.GetByID(ctx, a2.ID)
+	require.NoError(t, err)
+	assert.Equal(t, int64(5), got2.ViewsCount)
+
+	// Повторный флеш аккумулирует (views_count += delta).
+	require.NoError(t, r.AddViews(ctx, map[string]int64{a1.ID: 2}))
+	got1b, err := r.GetByID(ctx, a1.ID)
+	require.NoError(t, err)
+	assert.Equal(t, int64(5), got1b.ViewsCount)
+
+	// Пустая карта — no-op.
+	require.NoError(t, r.AddViews(ctx, nil))
+}
+
 func TestListingRepo_ExpireFlow(t *testing.T) {
 	ctx := context.Background()
 	pool := startDB(t)
