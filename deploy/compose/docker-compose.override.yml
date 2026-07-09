@@ -55,6 +55,9 @@ services:
   moderation:
     ports:
       - "127.0.0.1:8091:8080"   # прямой доступ к moderation (dev)
+  chat:
+    ports:
+      - "127.0.0.1:8092:8080"   # прямой доступ к chat (dev)
   grafana:
     ports:
       - "127.0.0.1:3000:3000"   # UI Grafana

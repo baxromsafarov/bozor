@@ -36,6 +36,7 @@ var Routes = []Route{
 	{Prefix: "/api/v1/media", Service: "media"},
 	{Prefix: "/api/v1/favorites", Service: svcFavorites},
 	{Prefix: "/api/v1/saved-searches", Service: svcFavorites},
+	{Prefix: "/api/v1/conversations", Service: "chat"},
 	{Prefix: "/api/v1/chat", Service: "chat"},
 	{Prefix: "/api/v1/notifications", Service: "notification"},
 	{Prefix: "/api/v1/reports", Service: "moderation"},
