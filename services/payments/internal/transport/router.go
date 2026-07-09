@@ -27,6 +27,7 @@ type Deps struct {
 	Catalog        *CatalogHandler
 	Wallet         *WalletHandler
 	Payments       *PaymentHandler
+	Promotion      *PromotionHandler
 	PaymeCallback  ProviderCallback
 	ClickCallback  ProviderCallback
 	ReadyChecks    map[string]httpx.Check
@@ -64,6 +65,10 @@ func NewRouter(d Deps) http.Handler {
 		}
 		if d.Payments != nil {
 			api.Post("/api/v1/wallet/topup", d.Payments.Topup)
+		}
+		if d.Promotion != nil {
+			api.Post("/api/v1/ads/{adID}/promote", d.Promotion.Promote)
+			api.Get("/api/v1/ads/{adID}/promotions", d.Promotion.List)
 		}
 	})
 

@@ -27,6 +27,7 @@ import (
 	"bozor/services/payments/internal/app"
 	"bozor/services/payments/internal/config"
 	"bozor/services/payments/internal/domain"
+	"bozor/services/payments/internal/listingclient"
 	"bozor/services/payments/internal/provider"
 	"bozor/services/payments/internal/provider/click"
 	"bozor/services/payments/internal/provider/mock"
@@ -120,11 +121,17 @@ func run() error {
 	clickProv := click.New(cfg.ClickServiceID, cfg.ClickMerchantID, cfg.ClickSecretKey, app.NewProviderOps(store, domain.ProviderClick), log)
 	paymentSvc := app.NewPaymentService(store, provider.NewRegistry(mockProv, paymeProv, clickProv), log)
 
+	// Применение услуг к объявлениям (сага покупки): цена из каталога по региону/
+	// категории объявления (читается из Listing), списание с кошелька, активация.
+	listing := listingclient.New(cfg.ListingInternalURL, config.ListingTimeout)
+	promotionSvc := app.NewPromotionService(listing, store, store, store, log)
+
 	router := transport.NewRouter(transport.Deps{
 		Log:            log,
 		Catalog:        transport.NewCatalogHandler(app.NewService(store, log), log),
 		Wallet:         transport.NewWalletHandler(app.NewWalletService(store, log), log),
 		Payments:       transport.NewPaymentHandler(paymentSvc, log),
+		Promotion:      transport.NewPromotionHandler(promotionSvc, log),
 		PaymeCallback:  paymeProv,
 		ClickCallback:  clickProv,
 		MetricsHandler: metricsHandler,

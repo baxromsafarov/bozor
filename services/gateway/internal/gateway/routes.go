@@ -29,10 +29,13 @@ var Routes = []Route{
 	{Prefix: "/api/v1/categories", Service: "catalog"},
 	{Prefix: "/api/v1/attributes", Service: "catalog"},
 	{Prefix: "/api/v1/locations", Service: "location"},
-	// Поиск — более специфичный префикс, чем /api/v1/ads (Listing): chi отдаёт
-	// приоритет статическому сегменту, поэтому /ads/search уходит в search, а
-	// /ads и /ads/{id} — в listing-ads.
+	// Поиск и продвижение — более специфичные пути, чем /api/v1/ads (Listing):
+	// chi отдаёт приоритет статическому сегменту, поэтому /ads/search уходит в
+	// search, /ads/{id}/promote — в payments-promotions, а /ads и /ads/{id} — в
+	// listing-ads.
 	{Prefix: "/api/v1/ads/search", Service: "search"},
+	{Prefix: "/api/v1/ads/{adID}/promote", Service: "payments-promotions"},
+	{Prefix: "/api/v1/ads/{adID}/promotions", Service: "payments-promotions"},
 	{Prefix: "/api/v1/ads", Service: "listing-ads"},
 	{Prefix: "/api/v1/media", Service: "media"},
 	{Prefix: "/api/v1/favorites", Service: svcFavorites},

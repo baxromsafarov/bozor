@@ -1435,4 +1435,34 @@ Stage 8.3 (ARCHITECTURE §4.12, ROADMAP 8.3) вводит провайдеров
 
 ---
 
+## ADR-041: Применение услуг к объявлениям — синхронная сага списание→активация→компенсация, цена по региону/категории объявления из Listing, bozor.promotion.activated
+
+**Дата:** 2026-07-10 · **Статус:** принято · **Глава:** 8.4
+
+### Контекст
+
+Stage 8.4 (ARCHITECTURE §4.12, §7, ROADMAP 8.4) применяет купленные услуги к объявлению: таблица `ad_promotions` (starts_at/ends_at/status/schedule_json), `POST /ads/{id}/promote` (услуга/набор → списание → активация), сага с компенсацией, асинхронная обработка. Вопросы: (1) как реализовать сагу списание→активация→компенсация; (2) откуда цена (зависит от региона/категории объявления); (3) как провести `/ads/{id}/promote` через gateway, где `/ads` уже принадлежит Listing; (4) как связать с поиском (is_top).
+
+### Решение
+
+**(1) Синхронная сага-хореография с компенсацией (выбрано).** `PromotionService.Promote`: (шаг 1) `wallet.Debit` — списание в локальной транзакции (леджер 8.2, kind=purchase, reference=ad_id); (шаг 2) `repo.ActivatePromotions` — вставка строк `ad_promotions` + `bozor.promotion.activated` в outbox одной транзакцией; (шаг 3) **при сбое активации — компенсация**: `wallet.Refund` (возврат средств + `bozor.wallet.refunded`). Предпроверки (объявление существует/принадлежит покупателю/активно; услуга/цена валидны) идут ДО списания, поэтому основное окно компенсации — ошибка БД на активации. Синхронная сага (а не событийная async) выбрана как достаточная: списание и активация — в одном сервисе (payments), кросс-сервисный шаг (пометка is_top в Search) идёт через событие и не входит в атомарность покупки. Полностью асинхронная обработка (202 + воркер активации) — задел на будущее.
+
+**(2) Цена из каталога по региону/категории объявления, читаемого из Listing (выбрано).** `POST /ads/{id}/promote` не принимает цену/регион от клиента: payments читает объявление из Listing `/internal/ads/{id}` (fetch-current-state, как модерация/индексатор — ADR-024) → владелец (проверка прав), регион+категория (для цены), заголовок (для события), статус (продвигать можно только `active`). Цена разрешается механизмом каталога 8.1 (`PriceRules` под регион/категорию → `ResolvePrices` по конкретности). Так цена авторитетна и не подделывается клиентом.
+
+**(3) Более специфичный param-маршрут в gateway (выбрано).** Добавлены маршруты `/api/v1/ads/{adID}/promote` и `/api/v1/ads/{adID}/promotions` → payments-promotions. chi (radix-trie) отдаёт приоритет статическому сегменту (`promote`/`promotions`) над catch-all `/ads/*` (Listing), поэтому `/ads/{id}/promote` уходит в payments, а `/ads/{id}` — в Listing (как `/ads/search` в Search, ADR-025).
+
+**(4) Событие несёт is_top/ends_at, но пометка в Search — 8.6 (выбрано).** `bozor.promotion.activated {ad_id, user_id, title, service_code, is_top, promotion_rank, ends_at}`: Notification потребляет (title — шаблон «продвижение активировано»); Search-сторона (пометка is_top/promotion_rank, ротация Топа) — Stage 8.6. Набор создаёт несколько `ad_promotions` (по услуге на элемент): TOP/VIP — со сроком (ends_at), BUMP — с расписанием авто-поднятий (schedule_json) для воркера 8.5; событие активации — одно на покупку с primary-услугой (TOP, если есть).
+
+### Детали решения
+
+- Миграция 00005: `ad_promotions` (id, ad_id, user_id, service_code, bundle_code, status CHECK active|expired|refunded|suspended, amount_uzs [доля стоимости для пропорц. возврата 8.7 — вся сумма на первой услуге], starts_at, ends_at [NULL у BUMP], schedule_json [дни авто-BUMP]; индексы по ad_id+status и активным по service_code+ends_at). FK на объявление нет (db-per-service).
+- repo: `ActivatePromotions` (вставка строк + событие одной tx), `ListAdPromotions`, `Refund` (creditTx kind=refund + `bozor.wallet.refunded` одной tx; `creditTx` вынесен из 8.2). app.PromotionService: buildPlan (одиночная услуга: проверка длительности из durations каталога; набор: элементы из bundle_items), сага Promote, Promotions (список). listingclient (payments): GetAd → owner/region/category/title/status. transport: `POST /api/v1/ads/{adID}/promote` / `GET .../promotions` под requireAuth; ошибки ad_not_found 404, not_ad_owner 403, ad_not_promotable/insufficient_funds 409, invalid_promotion/empty_promotion 422. config/compose: LISTING_INTERNAL_URL.
+
+### Последствия
+
+- Объявление получает платные услуги за счёт кошелька; событие активации доходит до Notification, а с 8.6 — до Search (топ-блок). Проверено вживую (payments+gateway пересобраны healthy, миграция 00005 applied=1): активное объявление владельца 1111… (Ташкент/легковые); (1) промо TOP/7 при балансе 25000 → 409 insufficient (цена в Ташкенте 45000 — региональная надбавка каталога применилась к объявлению); (2) топап 200000 (mock) → баланс 225000; (3) промо TOP/7 → 201, услуга TOP active со сроком, списание 45000 → баланс 180000 (проводка purchase −45000); (4) набор FAST_SALE → 2 услуги (TOP со сроком + BUMP с расписанием [2,4,6], bundle_code=FAST_SALE), списание 45000; (5) не-владелец → 403; (6) через gateway (JWT владельца): POST /ads/{id}/promote → 201 (маршрут ушёл в payments, не в Listing), GET /ads/{id}/promotions → 200 (4 активные), контрольный GET /ads/{id} → Listing (title на месте); 2 `bozor.promotion.activated` опубликованы (relayed) и приняты Notification; итоговый баланс 90000 == расчёт (25000+200000−45000×3), инвариант леджера сходится по всем кошелькам; /metrics 200. Unit (app: одиночная услуга/набор/не-владелец/не-найдено/не-активно/недостаток средств/КОМПЕНСАЦИЯ возврата при сбое активации/невалидная длительность/пустой запрос; transport: 201/401/404/403/409/422/список; gateway: promote→payments, /ads/{id}→listing) + integration на testcontainers (ActivatePromotions вставляет+событие+schedule в jsonb, Refund зачисляет+bozor.wallet.refunded+kind=refund) — go test PASS (unit + integration 44.8s); golangci-lint 0 issues (default+integration); gofmt чисто.
+- **Условия пересмотра:** полностью асинхронная активация (202 + воркер) при росте нагрузки; воркер авто-поднятий по schedule_json (8.5 — bumped_at + bozor.ad.bumped → переиндексация); пометка is_top/promotion_rank в Search и ротация Топа (8.6); пропорциональный возврат по неиспользованным дням при снятии/истечении объявления (8.7 — сейчас вся сумма на первой услуге, статусы refunded/suspended заведены); идемпотентность повторной покупки (сейчас допускается несколько активных TOP на объявление — ротация 8.6 берёт до 5 случайных); проверка баланса перед списанием только через Debit (гонок нет — FOR UPDATE в 8.2)."
+
+---
+
 *Конец журнала. Новые решения добавляются в конец с очередным номером ADR.*

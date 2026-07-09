@@ -679,7 +679,8 @@ services:
       POSTGRES_PORT: ${POSTGRES_PORT}
       PGBOUNCER_HOST: ${PGBOUNCER_HOST}
       PGBOUNCER_PORT: ${PGBOUNCER_PORT}
-      NATS_URL: ${NATS_URL}                      # publish bozor.payment.succeeded|failed → Notification
+      NATS_URL: ${NATS_URL}                      # publish bozor.payment.succeeded|failed / promotion.activated
+      LISTING_INTERNAL_URL: http://listing-ads:8080  # покупка услуги читает объявление (владелец/регион/категория)
       PAYME_MERCHANT_ID: ${PAYME_MERCHANT_ID}    # реквизиты провайдеров оплаты (проверка колбэков/ссылки)
       PAYME_KEY: ${PAYME_KEY}
       CLICK_SERVICE_ID: ${CLICK_SERVICE_ID}
@@ -691,7 +692,7 @@ services:
         condition: service_healthy
       pgbouncer:
         condition: service_healthy
-      nats:                  # publish bozor.payment.succeeded|failed
+      nats:                  # publish bozor.payment.succeeded|failed / promotion.activated
         condition: service_healthy
       tempo:
         condition: service_started

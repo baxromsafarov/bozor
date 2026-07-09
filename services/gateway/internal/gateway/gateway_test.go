@@ -96,6 +96,44 @@ func TestRouter_ProxiesToUpstream(t *testing.T) {
 	assert.Equal(t, int64(1), backend.calls.Load())
 }
 
+// TestRouter_PromoteRoutesToPayments — /ads/{id}/promote уходит в
+// payments-promotions, а /ads/{id} — в listing-ads (более специфичный путь
+// имеет приоритет, catch-all /ads не перехватывает).
+func TestRouter_PromoteRoutesToPayments(t *testing.T) {
+	payments := newEchoBackend()
+	defer payments.server.Close()
+	listing := newEchoBackend()
+	defer listing.server.Close()
+
+	h, err := NewRouter(Deps{
+		Log:            discardLogger(),
+		JWTKey:         testKey,
+		Limiter:        fakeLimiter{res: ratelimit.Result{Allowed: true, Remaining: 39}},
+		RateRPS:        20,
+		RateBurst:      40,
+		AllowedOrigins: []string{"*"},
+		Upstream: func(service string) string {
+			if service == "payments-promotions" {
+				return payments.server.URL
+			}
+			return listing.server.URL
+		},
+	})
+	require.NoError(t, err)
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/v1/ads/42/promote", nil))
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.EqualValues(t, 1, payments.calls.Load(), "promote → payments")
+	assert.EqualValues(t, 0, listing.calls.Load())
+
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/ads/42", nil))
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.EqualValues(t, 1, listing.calls.Load(), "обычный /ads/{id} → listing")
+	assert.EqualValues(t, 1, payments.calls.Load(), "payments не получил лишнего запроса")
+}
+
 func TestRouter_ForwardsVerifiedIdentity(t *testing.T) {
 	backend := newEchoBackend()
 	defer backend.server.Close()

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/url"
 	"strings"
+	"time"
 
 	"bozor/pkg/shared/config"
 )
@@ -27,6 +28,10 @@ type Config struct {
 
 	// NATSURL — адрес NATS JetStream (публикация bozor.payment.succeeded|failed).
 	NATSURL string
+
+	// ListingInternalURL — базовый URL внутреннего read-эндпоинта Listing
+	// (при покупке услуги читается объявление: владелец, регион/категория, статус).
+	ListingInternalURL string
 
 	// Реквизиты провайдеров оплаты (для проверки колбэков и ссылок оплаты).
 	PaymeMerchantID string
@@ -55,12 +60,13 @@ func Load() (*Config, error) {
 		MigrateDSN: dsn(user, pass,
 			config.String("POSTGRES_HOST", "postgres"),
 			config.String("POSTGRES_PORT", "5432")),
-		NATSURL:         config.String("NATS_URL", "nats://nats:4222"),
-		PaymeMerchantID: config.String("PAYME_MERCHANT_ID", "payme-merchant-dev"),
-		PaymeKey:        config.String("PAYME_KEY", "payme-key-dev"),
-		ClickServiceID:  config.String("CLICK_SERVICE_ID", "click-service-dev"),
-		ClickMerchantID: config.String("CLICK_MERCHANT_ID", "click-merchant-dev"),
-		ClickSecretKey:  config.String("CLICK_SECRET_KEY", "click-secret-dev"),
+		NATSURL:            config.String("NATS_URL", "nats://nats:4222"),
+		ListingInternalURL: config.String("LISTING_INTERNAL_URL", "http://listing-ads:8080"),
+		PaymeMerchantID:    config.String("PAYME_MERCHANT_ID", "payme-merchant-dev"),
+		PaymeKey:           config.String("PAYME_KEY", "payme-key-dev"),
+		ClickServiceID:     config.String("CLICK_SERVICE_ID", "click-service-dev"),
+		ClickMerchantID:    config.String("CLICK_MERCHANT_ID", "click-merchant-dev"),
+		ClickSecretKey:     config.String("CLICK_SECRET_KEY", "click-secret-dev"),
 	}, nil
 }
 
@@ -68,6 +74,9 @@ func Load() (*Config, error) {
 func Addr() string {
 	return config.String("PAYMENTS_ADDR", defaultAddr)
 }
+
+// ListingTimeout — таймаут чтения объявления из Listing при покупке услуги.
+const ListingTimeout = 5 * time.Second
 
 // dsn собирает строку подключения к базе сервиса (bozor_payments).
 func dsn(user, pass, host, port string) string {

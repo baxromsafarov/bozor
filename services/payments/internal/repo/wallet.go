@@ -8,10 +8,21 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
+	"bozor/pkg/shared/events"
+	"bozor/pkg/shared/outbox"
 	"bozor/pkg/shared/pgxx"
 
 	"bozor/services/payments/internal/domain"
 )
+
+// walletEventPayload — полезная нагрузка bozor.wallet.refunded (Notification:
+// user_id — получатель, amount+currency — сумма возврата).
+type walletEventPayload struct {
+	UserID   string `json:"user_id"`
+	Amount   int64  `json:"amount"`
+	Currency string `json:"currency"`
+	Reason   string `json:"reason"`
+}
 
 // GetWallet возвращает кошелёк пользователя. Если кошелька ещё нет, отдаёт
 // нулевой баланс (кошелёк создаётся лениво при первом пополнении).
@@ -69,6 +80,33 @@ func creditTx(ctx context.Context, tx pgx.Tx, userID string, amount int64, kind 
 	}, posting{
 		account: domain.AccountExternalTopup, walletUser: nil, direction: domain.DirectionDebit, amount: amount,
 	}); err != nil {
+		return domain.Wallet{}, err
+	}
+	return w, nil
+}
+
+// Refund возвращает средства на кошелёк (компенсация саги / возврат) одной
+// транзакцией: зачисление (kind=refund) + событие bozor.wallet.refunded в outbox.
+// reference связывает возврат с объявлением/услугой.
+func (r *Repo) Refund(ctx context.Context, userID string, amount int64, reference *string, reason string) (domain.Wallet, error) {
+	if amount <= 0 {
+		return domain.Wallet{}, domain.ErrInvalidAmount
+	}
+	var w domain.Wallet
+	err := pgxx.WithTx(ctx, r.pool, func(tx pgx.Tx) error {
+		var errTx error
+		if w, errTx = creditTx(ctx, tx, userID, amount, domain.KindRefund, reference); errTx != nil {
+			return errTx
+		}
+		ev, errTx := events.New(events.SubjectWalletRefunded, "payments", walletEventPayload{
+			UserID: userID, Amount: amount, Currency: domain.CurrencyUZS, Reason: reason,
+		})
+		if errTx != nil {
+			return fmt.Errorf("событие возврата: %w", errTx)
+		}
+		return outbox.Enqueue(ctx, tx, ev)
+	})
+	if err != nil {
 		return domain.Wallet{}, err
 	}
 	return w, nil
