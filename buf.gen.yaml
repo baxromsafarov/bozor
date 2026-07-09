@@ -1,0 +1,11 @@
+# Генерация Go из proto. Плагины ставятся `go install` (см. Makefile: make proto).
+# Сгенерированный код кладётся в общий модуль pkg/shared/pb — импортируется
+# и сервером (catalog), и клиентом (listing).
+version: v2
+plugins:
+  - local: protoc-gen-go
+    out: pkg/shared/pb
+    opt: paths=source_relative
+  - local: protoc-gen-go-grpc
+    out: pkg/shared/pb
+    opt: paths=source_relative

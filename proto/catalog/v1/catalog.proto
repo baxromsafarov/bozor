@@ -1,0 +1,30 @@
+syntax = "proto3";
+
+// Пакет синхронного контракта Catalog для межсервисных вызовов (Listing↔Catalog).
+package catalog.v1;
+
+option go_package = "bozor/pkg/shared/pb/catalog/v1;catalogv1";
+
+// CatalogService — запрос-ответные вызовы к Catalog. Первый потребитель —
+// Listing, валидирующий значения атрибутов объявления против набора категории.
+service CatalogService {
+  // GetEffectiveAttributes возвращает эффективный набор атрибутов категории
+  // (собственные + унаследованные по дереву). NOT_FOUND, если категории нет.
+  rpc GetEffectiveAttributes(GetEffectiveAttributesRequest) returns (GetEffectiveAttributesResponse);
+}
+
+message GetEffectiveAttributesRequest {
+  string category_id = 1;
+}
+
+message GetEffectiveAttributesResponse {
+  repeated AttributeSpec attributes = 1;
+}
+
+// AttributeSpec — правило валидации одного атрибута.
+message AttributeSpec {
+  string slug = 1;
+  string type = 2;             // enum|int|decimal|bool|string
+  bool required = 3;
+  repeated string options = 4; // slug'и допустимых вариантов для type=enum
+}

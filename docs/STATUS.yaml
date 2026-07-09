@@ -4,25 +4,14 @@ version: "1.0"
 
 current:
   chapter: "3"                     # CHAPTER 3: Listings & Media
-  stage: "3.3"                     # STAGE 3.3: Listing-сервис — модель (ads, ad_attribute_values, ad_images, outbox)
-  status: "in_progress"
-  wip:                             # чекпоинт 2026-07-09 — модель+валидация готовы, остаётся gRPC/HTTP/live
-    done:
-      - "Модуль services/listing (bozor/services/listing) добавлен в go.work; go.mod (uuid, pgx, testify)"
-      - "Миграция 00001_init_listing: ads (id UUIDv7, user_id, category_id, title, description, price bigint CHECK>=0 тийины, currency, region_id, city_id, lat/lng, status CHECK 8 значений, phone_display, contact_prefs jsonb, published_at/expires_at/bumped_at, views_count, created/updated; индексы user_status/status_published/category/expires-partial) + ad_attribute_values (PK(ad_id,attribute_slug), FK ON DELETE CASCADE) + ad_images (PK(ad_id,media_id), FK CASCADE, частичный UNIQUE обложки, индекс порядка) + outbox (DDL синхр.). Кросс-БД FK на category/region/media НЕТ (db-per-service)"
-      - "domain: Ad, Status (8 статусов) + статусная машина CanTransitionTo (draft→pending→active→sold/expired/archived; rejected↔pending; любой→blocked), Valid; AdAttributeValue, AdImage; ValidateCore (title/price/category/region), ValidateImages (лимит 10 + одна обложка); sentinel-ошибки. AttrSpec + ValidateAttributes: неизвестный атрибут/обязательный/тип(enum-опции,int,decimal,bool,string) — валидация значений против эффективного набора Catalog"
-      - "repo: CreateWithEvent (ad + attribute_values + images + outbox одной tx), GetByID (ad + атрибуты + изображения)"
-      - "app: CatalogValidator интерфейс (EffectiveAttributes(categoryID)→[]AttrSpec, ErrCategoryNotFound) — gRPC-шов; Service.Create (ValidateCore→ValidateImages→specs из Catalog→ValidateAttributes→UUIDv7→статус draft→событие bozor.ad.created→CreateWithEvent), Get"
-      - "Тесты unit: domain (статусная машина таблицей, ValidateCore/Images, ValidateAttributes все ветки) + app (Create happy/category-not-found/unknown-attr/missing-required/invalid-enum/core/too-many-images с фейковым CatalogValidator) — go test PASS; gofmt чисто; build+vet зелёные; go work sync"
-      - "Gateway уже маршрутизирует /api/v1/ads→listing-ads (routes.go, из 0.4); БД bozor_listing уже создаётся init-скриптом (0.3)"
-    remaining:
-      - "gRPC: определить proto (catalog EffectiveAttributes(category_id)→attrs с type/required/options), buf.gen (buf 1.71 установлен), сгенерировать; catalog — gRPC-сервер (порт 9090) поверх существующего app.AttributeService.EffectiveAttributes; listing — gRPC-клиент, реализующий app.CatalogValidator (маппинг NotFound→ErrCategoryNotFound); pkg/shared/grpcx уже даёт otel+recovery"
-      - "config (DSN app→PgBouncer/migrate→Postgres напрямую ADR-013, CATALOG_GRPC_ADDR, NATS), cmd/server/main.go (миграции+otel+metrics+pgx+NATS/relay+gRPC-клиент+wiring), Dockerfile (build-local go.work→distroless)"
-      - "transport HTTP (для проверки модели; полный API — 3.6): POST /api/v1/ads (owner из forwarded-идентичности→401 аноним, создание draft), GET /api/v1/ads/{id}; RFC 7807 (unknown_attribute/missing_required 422, category_not_found 422, ad_not_found 404); router с middleware pkg/shared + health/ready/metrics"
-      - "compose: сервис listing-ads (deps postgres/pgbouncer/nats + catalog для gRPC) + override dev-порт 8085 + gRPC-порт catalog + prometheus scrape; transport-тесты (401/201/422/404); интеграционный тест repo (testcontainers postgres: CreateWithEvent+GetByID с атрибутами/изображениями, каскад, outbox); гейтвей маршрут проверить"
-      - "Живая проверка: create объявления через gateway с валидными атрибутами→201 draft (строки в ads/ad_attribute_values/ad_images, bozor.ad.created в outbox→relay→NATS); невалидный enum/неизвестный атрибут→422 (валидация против Catalog по gRPC); несуществующая категория→422; GET по id возвращает атрибуты+изображения; аноним→401. Завершить: STATUS.yaml (3.3 completed, 18/52), DECISIONS (ADR gRPC-контракт Listing↔Catalog), commit+push"
+  stage: "3.4"                     # STAGE 3.4: жизненный цикл объявления (переходы, воркер истечения, повторная модерация)
+  status: "not_started"
 
 completed:
+  - stage_id: "3.3"
+    title: "Listing-сервис: модель ads + gRPC-валидация атрибутов против Catalog — первый gRPC-контракт"
+    completed_date: "2026-07-09"
+    evidence: "services/listing (модуль bozor/services/listing в go.work; БД bozor_listing). Миграция 00001: ads (UUIDv7, price bigint тийины CHECK>=0, currency, region_id/city_id/lat/lng, status CHECK 8 значений, phone_display, contact_prefs jsonb, published/expires/bumped_at, views_count; индексы user_status/status_published/category/expires-partial-active) + ad_attribute_values (PK ad_id+slug, FK CASCADE) + ad_images (PK ad_id+media_id, FK CASCADE, частичный UNIQUE обложки, индекс порядка) + outbox. Кросс-БД FK на category/region/media НЕТ (db-per-service). domain: статусная машина CanTransitionTo (draft→pending→active→sold/expired/archived; rejected↔pending; любой→blocked), ValidateCore/ValidateImages (лимит 10 + одна обложка); AttrSpec + ValidateAttributes — валидация значений против эффективного набора Catalog (неизвестный/обязательный/тип enum-int-decimal-bool-string). repo: CreateWithEvent (ad+атрибуты+изображения+outbox одной tx), GetByID (с детьми). app: CatalogValidator интерфейс + Create (draft, bozor.ad.created)/Get. ПЕРВЫЙ gRPC-контракт проекта (ADR-019): proto/catalog/v1 (GetEffectiveAttributes(category_id)→AttributeSpec{slug,type,required,options}, NOT_FOUND) → buf generate → pkg/shared/pb/catalog/v1 (make proto); catalog поднял gRPC-сервер на :9090 (grpcx otel+recovery) поверх app.AttributeService.Effective (grpcapi.Server); listing — gRPC-клиент (catalogclient) реализует app.CatalogValidator (codes.NotFound→ErrCategoryNotFound). transport HTTP: POST /api/v1/ads (owner из forwarded-идентичности→401, создание draft), GET /api/v1/ads/{id} публично; RFC 7807. config/main (миграции+otel+metrics+pgx+NATS/relay+gRPC-клиент), Dockerfile distroless, compose (listing-ads, dep catalog для gRPC, dev-порт 8085, scrape-job). Тесты: unit domain (статусная машина таблицей, валидация полей/изображений/атрибутов все ветки) + app (Create happy/category-not-found/unknown/missing-required/invalid-enum/core/too-many-images с фейковым валидатором) + transport (401/201/422×3/404/invalid_json с фейковым Service) + integration на testcontainers postgres (CreateWithEvent+GetByID с атрибутами по slug/изображениями по sort_order+outbox=1; каскад удаления детей; not-found) — go test PASS (default+integration 9.3s); golangci-lint 0 issues (listing default+integration, catalog); gofmt чисто; go work sync — все 7 модулей build/vet/test зелёные. Живая проверка (catalog+listing-ads healthy, gRPC :9090, миграция applied=1): создание объявления в cars через gateway (JWT→X-User-Id) с brand=toyota(enum)/year=2015(int)/mileage=120000 → 201 draft; строки в ads (title/price/status draft) + 3 ad_attribute_values + 1 ad_images(cover) + bozor.ad.created published=t (relay→NATS); НЕВАЛИДНЫЙ enum brand=lada→422 invalid_attribute_value; неизвестный атрибут color→422 unknown_attribute; отсутствует обязательный brand→422 missing_required_attribute; НЕСУЩЕСТВУЮЩАЯ категория→422 category_not_found (сквозь gRPC NOT_FOUND — межсервисная валидация Listing→Catalog доказана вживую); аноним→401; GET /ads/{id}→200 с атрибутами+изображениями"
   - stage_id: "3.2"
     title: "Воркер обработки медиа — превью 120/480/1080, снятие EXIF, presigned/CDN, очистка сирот"
     completed_date: "2026-07-09"
@@ -94,9 +83,9 @@ completed:
     evidence: "services/location (модуль bozor/services/location в go.work). Миграции: 00001 схема (regions: id smallint PK, slug UNIQUE, name_uz/name_ru, lat/lon, sort_order; cities: id PK, region_id FK ON DELETE CASCADE, slug UNIQUE, имена/гео/sort, индекс по region_id,sort_order) + 00002 идемпотентный сид (ADR-007, ON CONFLICT DO UPDATE): 14 первичных регионов (12 областей + г.Ташкент + Респ. Каракалпакстан) и 56 городов/районов с реальными координатами WGS84 — включая 12 районов Ташкента и по 2–4 города на регион (апострофы в узбекских названиях экранированы: Farg'ona, Qo'qon, Qoraqalpog'iston и т.д.). Слой: domain (Region/City, lat/lon *float64, ErrRegionNotFound), repo (Regions/CitiesByRegion/RegionExists через pgx, ORDER BY sort_order), app (Service; Cities → 404 при несуществующем регионе, пустой список = регион без городов), transport (chi + middleware pkg/shared, GET /api/v1/locations/regions, GET /api/v1/locations/regions/{id}/cities; 422 на нечисловой id). Config: только DSN (app→PgBouncer, migrate→Postgres напрямую, ADR-013). Миграции при старте через pkg/shared/migrate. Dockerfile build-local go.work → distroless nonroot, healthcheck /location -health. Compose: сервис location + dev-порт 8082 + scrape-job prometheus. Тесты: unit (config DSN, transport regions/cities/404/422/not-found) + integration на testcontainers postgres (14 регионов, 56 городов, 12 районов Ташкента, апостроф Farg'ona, RegionExists, пустой список для чужого региона) — go test -tags=integration PASS (6.7s); golangci-lint 0 issues (default+integration). Живая проверка (15 контейнеров): миграции applied=2, рестарт→applied=0 (идемпотентно); /readyz ready; напрямую и через gateway (routing /api/v1/locations→location): 14 регионов (первый — г.Ташкент), 12 районов Ташкента, апостроф Farg'ona корректен, Самарканд/Каттакурган/Ургут; 404 неизвестный регион, 422 нечисловой id; Prometheus up{job=location}=1"
 
 next_actions:
-  - "Stage 3.3: listing-сервис — таблицы ads, ad_attribute_values (валидация значений против Catalog), ad_images (привязка медиа к объявлению, обложка), outbox"
-  - "Stage 3.4: жизненный цикл объявления — draft→pending→active/rejected; active→sold/expired/archived; blocked; renew; воркер истечения по expires_at"
-  - "Stage 3.5: счётчик просмотров — буфер в Redis + периодический флеш в БД (без write-hotspot)"
+  - "Stage 3.4: жизненный цикл объявления — draft→pending→active/rejected; active→sold/expired/archived; blocked; повторная модерация после правки; renew; воркер истечения по expires_at; потребление bozor.ad.approved|rejected от Moderation"
+  - "Stage 3.5: счётчик просмотров — буфер в Redis (INCR по ad_id) + периодический флеш в БД батчем (без write-hotspot)"
+  - "Stage 3.6: API объявлений + outbox-события — POST/GET/PATCH/DELETE /ads, sold/renew, лента GET /ads, GET /me/ads; полный набор bozor.ad.*"
 
 decisions:                         # краткие ссылки; полные ADR — в DECISIONS.md
   - decision: "Брокер — NATS JetStream (не Kafka) ради лёгкости на Compose"
@@ -143,6 +132,10 @@ decisions:                         # краткие ссылки; полные A
     rationale: "Один деплой (консьюмер+тикер рядом с HTTP/relay); imaging без cgo (Windows-разработка); re-encode отбрасывает EXIF/GPS; processed_events+переход только из uploaded дают exactly-once; превью публично (CDN), оригинал владельцу presigned"
     date: "2026-07-09"
     alternatives: ["Отдельный worker-деплой", "libvips/ImageMagick (cgo)", "Парсинг/зачистка EXIF-тегов", "Хранить сирот бессрочно"]
+  - decision: "Межсервисный синхронный вызов Listing→Catalog — gRPC (proto+buf), генерат в pkg/shared/pb (ADR-019)"
+    rationale: "ТЗ требует gRPC для sync-вызовов; строгий контракт + breaking-checks buf; трассировка через grpcx (otel); клиент за интерфейсом CatalogValidator (тесты без сети); общий модуль pb для сервера и клиента. Первый gRPC в проекте — задаёт схему для остальных"
+    date: "2026-07-09"
+    alternatives: ["HTTP-вызов Catalog", "Репликация атрибутов в Listing событиями", "Валидация без Catalog"]
 
 open_questions: []
 
@@ -159,10 +152,10 @@ tech_stack:
   deploy: ["Docker Compose", "nginx"]
 
 metrics:
-  completed_stages: 17
+  completed_stages: 18
   total_stages: 52
-  completion_percentage: 33
-  estimated_remaining_stages: 35
-  chapters_completed: ["0", "1", "2"]   # CHAPTER 0, 1, 2 завершены; CHAPTER 3 (Listings & Media) в работе — 3.1 (upload) + 3.2 (обработка) готовы
+  completion_percentage: 35
+  estimated_remaining_stages: 34
+  chapters_completed: ["0", "1", "2"]   # CHAPTER 0, 1, 2 завершены; CHAPTER 3 в работе — 3.1 (upload) + 3.2 (обработка) + 3.3 (модель+gRPC) готовы
 
 notes: "Backend-only, фронтенда нет. Целевая нагрузка: десятки тысяч DAU. Автономный режим работы подтверждён заказчиком. Коммиты — от имени baxromsafarov. Окружение: Windows 11, Go 1.26.4, Docker Desktop 29.2.1 + Compose v5, golangci-lint 2.12.2, goose, buf. Нюанс: локально go test без -race (нет cgo на Windows); -race выполняется в CI на Ubuntu. goconst min-occurrences=5. Инфра-нюансы (Stage 0.3): postgres:18 монтирует /var/lib/postgresql (не .../data); healthcheck typesense — через bash /dev/tcp (нет curl/wget/nc в образе). Локальный .env создаётся из .env.example (gitignore)."

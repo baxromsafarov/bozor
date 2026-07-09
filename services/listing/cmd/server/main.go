@@ -1,4 +1,4 @@
-// Command server — точка входа Catalog-сервиса Bozor.
+// Command server — точка входа Listing-сервиса Bozor.
 package main
 
 import (
@@ -15,9 +15,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/redis/go-redis/v9"
-	"google.golang.org/grpc"
-
 	"bozor/pkg/shared/events"
 	"bozor/pkg/shared/grpcx"
 	"bozor/pkg/shared/httpx"
@@ -26,25 +23,17 @@ import (
 	"bozor/pkg/shared/natsx"
 	"bozor/pkg/shared/otelx"
 	"bozor/pkg/shared/outbox"
-	catalogv1 "bozor/pkg/shared/pb/catalog/v1"
 	"bozor/pkg/shared/pgxx"
 
-	"bozor/services/catalog/internal/app"
-	"bozor/services/catalog/internal/cache"
-	"bozor/services/catalog/internal/config"
-	"bozor/services/catalog/internal/grpcapi"
-	"bozor/services/catalog/internal/repo"
-	"bozor/services/catalog/internal/transport"
-	"bozor/services/catalog/migrations"
+	"bozor/services/listing/internal/app"
+	"bozor/services/listing/internal/catalogclient"
+	"bozor/services/listing/internal/config"
+	"bozor/services/listing/internal/repo"
+	"bozor/services/listing/internal/transport"
+	"bozor/services/listing/migrations"
 )
 
-const serviceName = "catalog"
-
-// treeCacheTTL — время жизни кеша дерева категорий (инвалидируется при записи).
-const treeCacheTTL = time.Hour
-
-// attrCacheTTL — время жизни кеша эффективных атрибутов (сбрасывается по поколению).
-const attrCacheTTL = time.Hour
+const serviceName = "listing"
 
 func main() {
 	healthcheck := flag.Bool("health", false, "выполнить self health-check по /healthz и выйти")
@@ -54,7 +43,7 @@ func main() {
 		os.Exit(runHealthCheck())
 	}
 	if err := run(); err != nil {
-		fmt.Fprintln(os.Stderr, "catalog:", err)
+		fmt.Fprintln(os.Stderr, "listing:", err)
 		os.Exit(1)
 	}
 }
@@ -95,10 +84,14 @@ func run() error {
 	}
 	defer pool.Close()
 
-	rdb := redis.NewClient(&redis.Options{Addr: cfg.RedisAddr, Password: cfg.RedisPassword})
-	defer func() { _ = rdb.Close() }()
+	// gRPC-клиент Catalog для валидации атрибутов (соединение ленивое).
+	catalogConn, err := grpcx.Dial(cfg.CatalogGRPCAddr)
+	if err != nil {
+		return fmt.Errorf("gRPC Catalog: %w", err)
+	}
+	defer func() { _ = catalogConn.Close() }()
 
-	// NATS JetStream + relay: события bozor.category.* из outbox в шину.
+	// NATS JetStream + relay: события bozor.ad.* из outbox в шину.
 	nc, js, err := natsx.Connect(cfg.NATSURL, serviceName)
 	if err != nil {
 		return fmt.Errorf("подключение к NATS: %w", err)
@@ -123,42 +116,15 @@ func run() error {
 	}()
 	defer wg.Wait()
 
-	catalogRepo := repo.NewRepo(pool)
-	svc := app.NewService(catalogRepo, cache.NewTreeCache(rdb, treeCacheTTL), log)
+	svc := app.NewService(repo.NewRepo(pool), catalogclient.New(catalogConn), log)
 	handler := transport.NewHandler(svc, log)
-	attrSvc := app.NewAttributeService(catalogRepo, catalogRepo, cache.NewAttrCache(rdb, attrCacheTTL), log)
-	attrHandler := transport.NewAttributeHandler(attrSvc, log)
-
-	// gRPC-сервер catalog.v1 (валидация атрибутов для Listing). Слушает отдельный
-	// порт; останавливается gracefully по сигналу через контекст.
-	grpcSrv := grpcx.NewServer(log)
-	catalogv1.RegisterCatalogServiceServer(grpcSrv, grpcapi.NewServer(attrSvc))
-	var lc net.ListenConfig
-	grpcLis, err := lc.Listen(ctx, "tcp", cfg.GRPCAddr)
-	if err != nil {
-		return fmt.Errorf("gRPC listen %s: %w", cfg.GRPCAddr, err)
-	}
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		log.Info("catalog gRPC стартует", slog.String("addr", cfg.GRPCAddr))
-		if err := grpcSrv.Serve(grpcLis); err != nil && !errors.Is(err, grpc.ErrServerStopped) {
-			log.Error("gRPC сервер остановлен с ошибкой", slog.String("error", err.Error()))
-		}
-	}()
-	go func() {
-		<-ctx.Done()
-		grpcSrv.GracefulStop()
-	}()
 
 	router := transport.NewRouter(transport.Deps{
 		Log:            log,
 		Handler:        handler,
-		AttributeH:     attrHandler,
 		MetricsHandler: metricsHandler,
 		ReadyChecks: map[string]httpx.Check{
 			"postgres": pool.Ping,
-			"redis":    func(ctx context.Context) error { return rdb.Ping(ctx).Err() },
 			"nats": func(context.Context) error {
 				if !nc.IsConnected() {
 					return errors.New("nats: нет соединения")
@@ -168,7 +134,7 @@ func run() error {
 		},
 	})
 
-	log.Info("catalog стартует", slog.String("addr", cfg.Addr), slog.String("env", cfg.Env))
+	log.Info("listing стартует", slog.String("addr", cfg.Addr), slog.String("env", cfg.Env))
 	return httpx.Serve(ctx, cfg.Addr, router, log)
 }
 

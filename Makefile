@@ -12,7 +12,7 @@ COMPOSE_BASE = docker compose -f deploy/compose/docker-compose.yml
 COMPOSE_DEV  = $(COMPOSE_BASE) -f deploy/compose/docker-compose.override.yml --env-file .env
 COMPOSE_PROD = $(COMPOSE_BASE) -f deploy/compose/docker-compose.prod.yml --env-file .env
 
-.PHONY: all lint test test-integration build tidy fmt gen up up-prod down down-prod ps logs migrate seed help
+.PHONY: all lint test test-integration build tidy fmt proto gen up up-prod down down-prod ps logs migrate seed help
 
 all: lint test build
 
@@ -55,9 +55,15 @@ tidy:
 fmt:
 	gofmt -w services pkg
 
-## gen: генерация кода из proto (buf)
-gen:
-	cd api/proto && buf generate
+## proto: генерация Go из proto (buf + protoc-gen-go/-go-grpc) в pkg/shared/pb
+proto:
+	go install google.golang.org/protobuf/cmd/protoc-gen-go@latest
+	go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest
+	PATH="$(GOBIN):$$PATH" buf lint
+	PATH="$(GOBIN):$$PATH" buf generate
+
+## gen: алиас proto (обратная совместимость)
+gen: proto
 
 ## up: поднять всю платформу локально (dev: порты проброшены на localhost)
 up:
