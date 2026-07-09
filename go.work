@@ -5,6 +5,7 @@ use (
 	./services/auth
 	./services/catalog
 	./services/gateway
+	./services/listing
 	./services/location
 	./services/media
 )

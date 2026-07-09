@@ -5,7 +5,22 @@ version: "1.0"
 current:
   chapter: "3"                     # CHAPTER 3: Listings & Media
   stage: "3.3"                     # STAGE 3.3: Listing-сервис — модель (ads, ad_attribute_values, ad_images, outbox)
-  status: "not_started"
+  status: "in_progress"
+  wip:                             # чекпоинт 2026-07-09 — модель+валидация готовы, остаётся gRPC/HTTP/live
+    done:
+      - "Модуль services/listing (bozor/services/listing) добавлен в go.work; go.mod (uuid, pgx, testify)"
+      - "Миграция 00001_init_listing: ads (id UUIDv7, user_id, category_id, title, description, price bigint CHECK>=0 тийины, currency, region_id, city_id, lat/lng, status CHECK 8 значений, phone_display, contact_prefs jsonb, published_at/expires_at/bumped_at, views_count, created/updated; индексы user_status/status_published/category/expires-partial) + ad_attribute_values (PK(ad_id,attribute_slug), FK ON DELETE CASCADE) + ad_images (PK(ad_id,media_id), FK CASCADE, частичный UNIQUE обложки, индекс порядка) + outbox (DDL синхр.). Кросс-БД FK на category/region/media НЕТ (db-per-service)"
+      - "domain: Ad, Status (8 статусов) + статусная машина CanTransitionTo (draft→pending→active→sold/expired/archived; rejected↔pending; любой→blocked), Valid; AdAttributeValue, AdImage; ValidateCore (title/price/category/region), ValidateImages (лимит 10 + одна обложка); sentinel-ошибки. AttrSpec + ValidateAttributes: неизвестный атрибут/обязательный/тип(enum-опции,int,decimal,bool,string) — валидация значений против эффективного набора Catalog"
+      - "repo: CreateWithEvent (ad + attribute_values + images + outbox одной tx), GetByID (ad + атрибуты + изображения)"
+      - "app: CatalogValidator интерфейс (EffectiveAttributes(categoryID)→[]AttrSpec, ErrCategoryNotFound) — gRPC-шов; Service.Create (ValidateCore→ValidateImages→specs из Catalog→ValidateAttributes→UUIDv7→статус draft→событие bozor.ad.created→CreateWithEvent), Get"
+      - "Тесты unit: domain (статусная машина таблицей, ValidateCore/Images, ValidateAttributes все ветки) + app (Create happy/category-not-found/unknown-attr/missing-required/invalid-enum/core/too-many-images с фейковым CatalogValidator) — go test PASS; gofmt чисто; build+vet зелёные; go work sync"
+      - "Gateway уже маршрутизирует /api/v1/ads→listing-ads (routes.go, из 0.4); БД bozor_listing уже создаётся init-скриптом (0.3)"
+    remaining:
+      - "gRPC: определить proto (catalog EffectiveAttributes(category_id)→attrs с type/required/options), buf.gen (buf 1.71 установлен), сгенерировать; catalog — gRPC-сервер (порт 9090) поверх существующего app.AttributeService.EffectiveAttributes; listing — gRPC-клиент, реализующий app.CatalogValidator (маппинг NotFound→ErrCategoryNotFound); pkg/shared/grpcx уже даёт otel+recovery"
+      - "config (DSN app→PgBouncer/migrate→Postgres напрямую ADR-013, CATALOG_GRPC_ADDR, NATS), cmd/server/main.go (миграции+otel+metrics+pgx+NATS/relay+gRPC-клиент+wiring), Dockerfile (build-local go.work→distroless)"
+      - "transport HTTP (для проверки модели; полный API — 3.6): POST /api/v1/ads (owner из forwarded-идентичности→401 аноним, создание draft), GET /api/v1/ads/{id}; RFC 7807 (unknown_attribute/missing_required 422, category_not_found 422, ad_not_found 404); router с middleware pkg/shared + health/ready/metrics"
+      - "compose: сервис listing-ads (deps postgres/pgbouncer/nats + catalog для gRPC) + override dev-порт 8085 + gRPC-порт catalog + prometheus scrape; transport-тесты (401/201/422/404); интеграционный тест repo (testcontainers postgres: CreateWithEvent+GetByID с атрибутами/изображениями, каскад, outbox); гейтвей маршрут проверить"
+      - "Живая проверка: create объявления через gateway с валидными атрибутами→201 draft (строки в ads/ad_attribute_values/ad_images, bozor.ad.created в outbox→relay→NATS); невалидный enum/неизвестный атрибут→422 (валидация против Catalog по gRPC); несуществующая категория→422; GET по id возвращает атрибуты+изображения; аноним→401. Завершить: STATUS.yaml (3.3 completed, 18/52), DECISIONS (ADR gRPC-контракт Listing↔Catalog), commit+push"
 
 completed:
   - stage_id: "3.2"
