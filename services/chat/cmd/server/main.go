@@ -112,11 +112,13 @@ func run() error {
 	defer wg.Wait()
 
 	listing := listingclient.New(cfg.ListingInternalURL, config.ListingTimeout)
-	chatSvc := app.NewService(store, listing, log)
 
 	// WebSocket: реестр соединений + backplane между репликами через NATS core
-	// pub/sub. baseCtx (ctx сигналов) закрывает соединения при остановке сервиса.
+	// pub/sub. presence — проверка онлайн-статуса (request-reply), delivery —
+	// realtime-доставка кадров. baseCtx (ctx сигналов) закрывает соединения при
+	// остановке сервиса.
 	hub := ws.NewHub(ws.NewNATSBackplane(nc), log)
+	chatSvc := app.NewService(store, listing, ws.NewPresence(nc), ws.NewDelivery(hub), log)
 	wsHandler := ws.NewHandler(ctx, hub, chatSvc, cfg.JWTSigningKey, log)
 
 	router := transport.NewRouter(transport.Deps{

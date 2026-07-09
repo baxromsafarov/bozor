@@ -85,8 +85,17 @@ func TestEnsureConversation_Idempotent(t *testing.T) {
 	assert.Equal(t, 1, n, "дубликат не создан")
 }
 
+// chatEvent строит свежий конверт bozor.chat.message_sent (уникальный event_id).
+func chatEvent(t *testing.T, recipient string) *events.Envelope {
+	t.Helper()
+	ev, err := events.New(events.SubjectChatMessageSent, "chat", map[string]string{"user_id": recipient})
+	require.NoError(t, err)
+	return &ev
+}
+
 // TestInsertMessage_UpdatesConversationAndOutbox — отправка сообщения вставляет
-// строку, двигает last_message_at и кладёт событие в outbox одной транзакцией.
+// строку, двигает last_message_at и (если ev задано) кладёт событие в outbox.
+// ev=nil (получатель онлайн) — без события в outbox.
 func TestInsertMessage_UpdatesConversationAndOutbox(t *testing.T) {
 	ctx := context.Background()
 	pool := startDB(t)
@@ -98,9 +107,7 @@ func TestInsertMessage_UpdatesConversationAndOutbox(t *testing.T) {
 
 	msgTime := time.Now().UTC().Add(time.Minute)
 	msg := domain.Message{ID: newID(t), ConversationID: c.ID, SenderID: buyer, Body: "привет", CreatedAt: msgTime}
-	ev, err := events.New(events.SubjectChatMessageSent, "chat", map[string]string{"user_id": seller})
-	require.NoError(t, err)
-	require.NoError(t, r.InsertMessageWithEvent(ctx, msg, ev))
+	require.NoError(t, r.InsertMessage(ctx, msg, chatEvent(t, seller)))
 
 	var (
 		body    string
@@ -113,6 +120,54 @@ func TestInsertMessage_UpdatesConversationAndOutbox(t *testing.T) {
 	assert.WithinDuration(t, msgTime, lastMsg, time.Second, "last_message_at сдвинут ко времени сообщения")
 	require.NoError(t, pool.QueryRow(ctx, `SELECT count(*) FROM outbox WHERE subject=$1`, events.SubjectChatMessageSent).Scan(&outbox))
 	assert.Equal(t, 1, outbox, "событие в outbox")
+
+	// Второе сообщение без события (получатель онлайн) — outbox не растёт.
+	msg2 := domain.Message{ID: newID(t), ConversationID: c.ID, SenderID: buyer, Body: "ещё", CreatedAt: msgTime.Add(time.Minute)}
+	require.NoError(t, r.InsertMessage(ctx, msg2, nil))
+	require.NoError(t, pool.QueryRow(ctx, `SELECT count(*) FROM outbox WHERE subject=$1`, events.SubjectChatMessageSent).Scan(&outbox))
+	assert.Equal(t, 1, outbox, "онлайн-доставка не плодит событие")
+}
+
+// TestMarkRead_And_UnreadCount — непрочитанные считаются для собеседника, а
+// MarkRead помечает только чужие сообщения и обнуляет счётчик.
+func TestMarkRead_And_UnreadCount(t *testing.T) {
+	ctx := context.Background()
+	pool := startDB(t)
+	r := repo.NewRepo(pool)
+
+	adID, buyer, seller := newID(t), newID(t), newID(t)
+	c, err := r.EnsureConversation(ctx, conv(t, adID, buyer, seller))
+	require.NoError(t, err)
+
+	base := time.Now().UTC()
+	// Покупатель написал 2 сообщения продавцу.
+	for i := 0; i < 2; i++ {
+		m := domain.Message{ID: newID(t), ConversationID: c.ID, SenderID: buyer, Body: "q", CreatedAt: base.Add(time.Duration(i) * time.Second)}
+		require.NoError(t, r.InsertMessage(ctx, m, chatEvent(t, seller)))
+	}
+
+	// Для продавца непрочитанных = 2, для покупателя (свои же сообщения) = 0.
+	sellerConvs, err := r.ListConversations(ctx, seller, 10)
+	require.NoError(t, err)
+	require.Len(t, sellerConvs, 1)
+	assert.Equal(t, 2, sellerConvs[0].UnreadCount, "непрочитанные собеседника")
+	buyerConvs, err := r.ListConversations(ctx, buyer, 10)
+	require.NoError(t, err)
+	assert.Equal(t, 0, buyerConvs[0].UnreadCount, "свои сообщения не непрочитаны")
+
+	// Продавец читает: помечаются только сообщения покупателя.
+	n, err := r.MarkRead(ctx, c.ID, seller, time.Now().UTC())
+	require.NoError(t, err)
+	assert.EqualValues(t, 2, n)
+
+	sellerConvs, err = r.ListConversations(ctx, seller, 10)
+	require.NoError(t, err)
+	assert.Equal(t, 0, sellerConvs[0].UnreadCount, "после прочтения — 0")
+
+	// Повторный MarkRead — нечего помечать.
+	n, err = r.MarkRead(ctx, c.ID, seller, time.Now().UTC())
+	require.NoError(t, err)
+	assert.EqualValues(t, 0, n)
 }
 
 // TestListConversations_ByParticipant — диалоги видны и покупателю, и продавцу,
@@ -131,9 +186,8 @@ func TestListConversations_ByParticipant(t *testing.T) {
 	require.NoError(t, err)
 
 	// Сообщение в cB делает его свежее.
-	ev, _ := events.New(events.SubjectChatMessageSent, "chat", map[string]string{"user_id": seller})
-	require.NoError(t, r.InsertMessageWithEvent(ctx,
-		domain.Message{ID: newID(t), ConversationID: cB.ID, SenderID: buyerB, Body: "hi", CreatedAt: time.Now().UTC().Add(time.Hour)}, ev))
+	require.NoError(t, r.InsertMessage(ctx,
+		domain.Message{ID: newID(t), ConversationID: cB.ID, SenderID: buyerB, Body: "hi", CreatedAt: time.Now().UTC().Add(time.Hour)}, chatEvent(t, seller)))
 
 	// Продавец видит оба, свежий (cB) — первым.
 	sellerConvs, err := r.ListConversations(ctx, seller, 10)
@@ -162,10 +216,7 @@ func TestListMessages_Chronological(t *testing.T) {
 	for i, txt := range []string{"первое", "второе", "третье"} {
 		m := domain.Message{ID: newID(t), ConversationID: c.ID, SenderID: buyer, Body: txt,
 			CreatedAt: base.Add(time.Duration(i) * time.Minute)}
-		// Свежий конверт на каждое сообщение (уникальный event_id — PK outbox).
-		ev, err := events.New(events.SubjectChatMessageSent, "chat", map[string]string{"user_id": seller})
-		require.NoError(t, err)
-		require.NoError(t, r.InsertMessageWithEvent(ctx, m, ev))
+		require.NoError(t, r.InsertMessage(ctx, m, chatEvent(t, seller)))
 	}
 
 	msgs, err := r.ListMessages(ctx, c.ID, 10)

@@ -17,6 +17,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"bozor/pkg/shared/authx"
+	"bozor/pkg/shared/events"
 
 	"bozor/services/chat/internal/app"
 	"bozor/services/chat/internal/domain"
@@ -25,7 +26,8 @@ import (
 const testKey = "test-signing-key-0123456789"
 
 // loopback — внутрипроцессный backplane: Publish синхронно вызывает handler'ы
-// подписчиков (как NATS на одном узле). Позволяет тестировать доставку без сети.
+// подписчиков (как NATS на одном узле). RespondPresence — no-op (присутствие в
+// тестах задаётся fakePresence, минуя шину).
 type loopback struct {
 	mu   sync.Mutex
 	subs map[string][]*func([]byte)
@@ -51,6 +53,8 @@ func (l *loopback) Subscribe(userID string, handler func([]byte)) (Subscription,
 	return &loopbackSub{l: l, userID: userID, hp: hp}, nil
 }
 
+func (l *loopback) RespondPresence(string) (Subscription, error) { return noopSub{}, nil }
+
 type loopbackSub struct {
 	l      *loopback
 	userID string
@@ -70,23 +74,36 @@ func (s *loopbackSub) Unsubscribe() error {
 	return nil
 }
 
-// fakeSender — заглушка отправки: сохраняет вызов и возвращает готовое сообщение.
-type fakeSender struct {
-	recipient string
-	err       error
-	gotConv   string
-	gotSender string
-	gotBody   string
+// fakeStore — минимальный app.Store для интеграции WS: GetConversation отдаёт
+// заданный диалог, InsertMessage/MarkRead — no-op с настраиваемым результатом.
+type fakeStore struct {
+	conv  domain.Conversation
+	found bool
+	markN int64
 }
 
-func (f *fakeSender) SendMessage(_ context.Context, convID, senderID, body string) (domain.Message, string, error) {
-	f.gotConv, f.gotSender, f.gotBody = convID, senderID, body
-	if f.err != nil {
-		return domain.Message{}, "", f.err
-	}
-	return domain.Message{ID: "m-1", ConversationID: convID, SenderID: senderID, Body: body,
-		CreatedAt: time.Unix(1700000000, 0).UTC()}, f.recipient, nil
+func (f *fakeStore) EnsureConversation(_ context.Context, c domain.Conversation) (domain.Conversation, error) {
+	return c, nil
 }
+func (f *fakeStore) GetConversation(_ context.Context, _ string) (domain.Conversation, bool, error) {
+	return f.conv, f.found, nil
+}
+func (f *fakeStore) ListConversations(_ context.Context, _ string, _ int) ([]domain.Conversation, error) {
+	return nil, nil
+}
+func (f *fakeStore) ListMessages(_ context.Context, _ string, _ int) ([]domain.Message, error) {
+	return nil, nil
+}
+func (f *fakeStore) InsertMessage(_ context.Context, _ domain.Message, _ *events.Envelope) error {
+	return nil
+}
+func (f *fakeStore) MarkRead(_ context.Context, _, _ string, _ time.Time) (int64, error) {
+	return f.markN, nil
+}
+
+type fakePresence struct{ online bool }
+
+func (f fakePresence) Online(context.Context, string) (bool, error) { return f.online, nil }
 
 func testLog() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
 
@@ -97,11 +114,12 @@ func mint(t *testing.T, userID string) string {
 	return tok
 }
 
-// wsServer поднимает /ws на httptest-сервере с реальным Hub поверх loopback-backplane.
-func wsServer(t *testing.T, sender Sender) *httptest.Server {
+// wsServer поднимает /ws с реальными app.Service + Hub + Delivery поверх loopback.
+func wsServer(t *testing.T, store *fakeStore, online bool) *httptest.Server {
 	t.Helper()
 	hub := NewHub(newLoopback(), testLog())
-	h := NewHandler(context.Background(), hub, sender, []byte(testKey), testLog())
+	svc := app.NewService(store, nil, fakePresence{online: online}, NewDelivery(hub), testLog())
+	h := NewHandler(context.Background(), hub, svc, []byte(testKey), testLog())
 	srv := httptest.NewServer(http.HandlerFunc(h.ServeWS))
 	t.Cleanup(srv.Close)
 	return srv
@@ -111,7 +129,6 @@ func wsURL(srv *httptest.Server, token string) string {
 	return "ws" + strings.TrimPrefix(srv.URL, "http") + "/ws?token=" + token
 }
 
-// dial подключается к WS-серверу и закрывает соединение по завершении теста.
 func dial(t *testing.T, ctx context.Context, srv *httptest.Server, userID string) *websocket.Conn {
 	t.Helper()
 	c, resp, err := websocket.Dial(ctx, wsURL(srv, mint(t, userID)), nil)
@@ -123,8 +140,21 @@ func dial(t *testing.T, ctx context.Context, srv *httptest.Server, userID string
 	return c
 }
 
+func readFrameJSON(t *testing.T, ctx context.Context, c *websocket.Conn) map[string]any {
+	t.Helper()
+	_, data, err := c.Read(ctx)
+	require.NoError(t, err)
+	var m map[string]any
+	require.NoError(t, json.Unmarshal(data, &m))
+	return m
+}
+
+func convOf(buyer, seller string) domain.Conversation {
+	return domain.Conversation{ID: "c-1", AdID: "ad-1", BuyerID: buyer, SellerID: seller}
+}
+
 func TestWS_RejectsBadToken(t *testing.T) {
-	srv := wsServer(t, &fakeSender{})
+	srv := wsServer(t, &fakeStore{}, false)
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	_, resp, err := websocket.Dial(ctx, wsURL(srv, "garbage"), nil)
@@ -136,15 +166,12 @@ func TestWS_RejectsBadToken(t *testing.T) {
 
 func TestWS_SendDeliversToRecipientAndAcksSender(t *testing.T) {
 	buyer, seller := "buyer-1", "seller-1"
-	sender := &fakeSender{recipient: seller}
-	srv := wsServer(t, sender)
+	srv := wsServer(t, &fakeStore{conv: convOf(buyer, seller), found: true}, true)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 	defer cancel()
 
-	// Получатель (продавец) подключается и слушает.
 	sellerConn := dial(t, ctx, srv, seller)
-
 	recv := make(chan map[string]any, 2)
 	go func() {
 		_, data, err := sellerConn.Read(ctx)
@@ -155,30 +182,15 @@ func TestWS_SendDeliversToRecipientAndAcksSender(t *testing.T) {
 		_ = json.Unmarshal(data, &m)
 		recv <- m
 	}()
+	time.Sleep(200 * time.Millisecond) // дать продавцу подписаться
 
-	// Дать продавцу подписаться на backplane до отправки.
-	time.Sleep(200 * time.Millisecond)
-
-	// Отправитель (покупатель) подключается и шлёт сообщение.
 	buyerConn := dial(t, ctx, srv, buyer)
-
 	frame, _ := json.Marshal(map[string]string{"conversation_id": "c-1", "body": "привет"})
 	require.NoError(t, buyerConn.Write(ctx, websocket.MessageText, frame))
 
-	// Покупатель получает ack.
-	_, ackData, err := buyerConn.Read(ctx)
-	require.NoError(t, err)
-	var ack map[string]any
-	require.NoError(t, json.Unmarshal(ackData, &ack))
+	ack := readFrameJSON(t, ctx, buyerConn)
 	assert.Equal(t, "ack", ack["type"])
-	assert.Equal(t, "m-1", ack["id"])
 
-	// Отправка прошла через Sender с корректными параметрами.
-	assert.Equal(t, "c-1", sender.gotConv)
-	assert.Equal(t, buyer, sender.gotSender)
-	assert.Equal(t, "привет", sender.gotBody)
-
-	// Продавец получает кадр сообщения (через backplane).
 	select {
 	case m := <-recv:
 		assert.Equal(t, "message", m["type"])
@@ -189,22 +201,54 @@ func TestWS_SendDeliversToRecipientAndAcksSender(t *testing.T) {
 	}
 }
 
-func TestWS_SendError_ReturnsErrorFrame(t *testing.T) {
-	sender := &fakeSender{err: app.ErrNotParticipant}
-	srv := wsServer(t, sender)
+func TestWS_ReadReceipt_NotifiesCounterpart(t *testing.T) {
+	buyer, seller := "buyer-1", "seller-1"
+	// markN>0 → MarkRead уведомит собеседника (buyer).
+	srv := wsServer(t, &fakeStore{conv: convOf(buyer, seller), found: true, markN: 2}, true)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+
+	buyerConn := dial(t, ctx, srv, buyer)
+	recv := make(chan map[string]any, 2)
+	go func() {
+		_, data, err := buyerConn.Read(ctx)
+		if err != nil {
+			return
+		}
+		var m map[string]any
+		_ = json.Unmarshal(data, &m)
+		recv <- m
+	}()
+	time.Sleep(200 * time.Millisecond)
+
+	// Продавец помечает диалог прочитанным.
+	sellerConn := dial(t, ctx, srv, seller)
+	frame, _ := json.Marshal(map[string]string{"type": "read", "conversation_id": "c-1"})
+	require.NoError(t, sellerConn.Write(ctx, websocket.MessageText, frame))
+
+	select {
+	case m := <-recv:
+		assert.Equal(t, "read", m["type"], "автор получает уведомление о прочтении")
+		assert.Equal(t, seller, m["reader_id"])
+		assert.Equal(t, "c-1", m["conversation_id"])
+	case <-time.After(3 * time.Second):
+		t.Fatal("автор не получил отметку о прочтении")
+	}
+}
+
+func TestWS_SendToForeignConversation_ReturnsErrorFrame(t *testing.T) {
+	// Диалог без отправителя среди участников → ErrNotParticipant.
+	srv := wsServer(t, &fakeStore{conv: convOf("buyer-1", "seller-1"), found: true}, false)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
 	conn := dial(t, ctx, srv, "stranger")
-
 	frame, _ := json.Marshal(map[string]string{"conversation_id": "c-1", "body": "привет"})
 	require.NoError(t, conn.Write(ctx, websocket.MessageText, frame))
 
-	_, data, err := conn.Read(ctx)
-	require.NoError(t, err)
-	var e map[string]any
-	require.NoError(t, json.Unmarshal(data, &e))
+	e := readFrameJSON(t, ctx, conn)
 	assert.Equal(t, "error", e["type"])
 	assert.Equal(t, "forbidden", e["code"])
 }

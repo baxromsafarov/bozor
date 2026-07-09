@@ -40,10 +40,12 @@ func (c *Conn) closeSlow() {
 	})
 }
 
-// userEntry — набор локальных соединений пользователя и его подписка backplane.
+// userEntry — набор локальных соединений пользователя, его подписка realtime и
+// ответчик присутствия (пока пользователь подключён к этой реплике).
 type userEntry struct {
 	conns map[*Conn]struct{}
-	sub   Subscription
+	sub   Subscription // realtime chat.rt.<userID>
+	psub  Subscription // ответчик присутствия chat.presence.<userID>
 }
 
 // Hub — локальный реестр соединений реплики с межрепличной доставкой. Одна
@@ -73,7 +75,12 @@ func (h *Hub) Add(userID string, c *Conn) error {
 		if err != nil {
 			return err
 		}
-		e = &userEntry{conns: make(map[*Conn]struct{}), sub: sub}
+		psub, err := h.bp.RespondPresence(userID)
+		if err != nil {
+			_ = sub.Unsubscribe()
+			return err
+		}
+		e = &userEntry{conns: make(map[*Conn]struct{}), sub: sub, psub: psub}
 		h.users[userID] = e
 	}
 	e.conns[c] = struct{}{}
@@ -94,6 +101,9 @@ func (h *Hub) Remove(userID string, c *Conn) {
 	if len(e.conns) == 0 {
 		if err := e.sub.Unsubscribe(); err != nil {
 			h.log.Warn("отмена подписки backplane", slog.String("user_id", userID), slog.String("error", err.Error()))
+		}
+		if err := e.psub.Unsubscribe(); err != nil {
+			h.log.Warn("отмена ответчика присутствия", slog.String("user_id", userID), slog.String("error", err.Error()))
 		}
 		delete(h.users, userID)
 	}

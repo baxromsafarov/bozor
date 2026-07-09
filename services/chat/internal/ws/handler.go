@@ -23,17 +23,19 @@ const (
 	writeTimeout = 5 * time.Second
 )
 
-// Sender — отправка сообщения (реализуется app.Service). Возвращает сохранённое
-// сообщение и id адресата для realtime-доставки.
-type Sender interface {
+// App — use-cases чата, вызываемые по WS (реализуется app.Service). SendMessage
+// сам гейтит Telegram-уведомление по присутствию и доставляет получателю realtime;
+// обработчик лишь подтверждает отправителю.
+type App interface {
 	SendMessage(ctx context.Context, conversationID, senderID, body string) (domain.Message, string, error)
+	MarkRead(ctx context.Context, conversationID, readerID string) (int, error)
 }
 
 // Handler обслуживает WebSocket-эндпоинт /ws: аутентифицирует соединение по JWT
 // (эндпоинт идёт мимо gateway), регистрирует его в Hub и обрабатывает кадры.
 type Handler struct {
 	hub     *Hub
-	sender  Sender
+	app     App
 	key     []byte
 	baseCtx context.Context
 	log     *slog.Logger
@@ -41,8 +43,8 @@ type Handler struct {
 
 // NewHandler создаёт WS-обработчик. baseCtx — контекст жизни сервиса: его отмена
 // (graceful shutdown) закрывает активные соединения.
-func NewHandler(baseCtx context.Context, hub *Hub, sender Sender, key []byte, log *slog.Logger) *Handler {
-	return &Handler{hub: hub, sender: sender, key: key, baseCtx: baseCtx, log: log}
+func NewHandler(baseCtx context.Context, hub *Hub, application App, key []byte, log *slog.Logger) *Handler {
+	return &Handler{hub: hub, app: application, key: key, baseCtx: baseCtx, log: log}
 }
 
 // ServeWS аутентифицирует и апгрейдит соединение, затем качает кадры до закрытия.
@@ -115,23 +117,26 @@ func (h *Handler) readLoop(ctx context.Context, userID string, conn *Conn, c *we
 	}
 }
 
-// onFrame обрабатывает один клиентский кадр: сохраняет сообщение, доставляет
-// адресату через backplane и подтверждает отправителю.
+// onFrame обрабатывает один клиентский кадр: отправку сообщения или отметку
+// прочтения. Доставку получателю (realtime + гейтинг Telegram) выполняет App.
 func (h *Handler) onFrame(ctx context.Context, userID string, conn *Conn, data []byte) {
 	var in inbound
 	if err := json.Unmarshal(data, &in); err != nil {
 		conn.enqueue(errorFrame("bad_frame", "неверный формат кадра"))
 		return
 	}
-	msg, recipient, err := h.sender.SendMessage(ctx, in.ConversationID, userID, in.Body)
+	if in.Type == frameRead {
+		if _, err := h.app.MarkRead(ctx, in.ConversationID, userID); err != nil {
+			code, text := classify(err)
+			conn.enqueue(errorFrame(code, text))
+		}
+		return
+	}
+	msg, _, err := h.app.SendMessage(ctx, in.ConversationID, userID, in.Body)
 	if err != nil {
 		code, text := classify(err)
 		conn.enqueue(errorFrame(code, text))
 		return
-	}
-	// Realtime-доставка адресату (его реплика запишет кадр в сокеты).
-	if err := h.hub.Publish(recipient, messageFrame(msg)); err != nil {
-		h.log.ErrorContext(ctx, "backplane publish", slog.String("error", err.Error()))
 	}
 	conn.enqueue(ackFrame(msg))
 }

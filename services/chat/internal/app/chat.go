@@ -32,7 +32,8 @@ type Store interface {
 	GetConversation(ctx context.Context, id string) (domain.Conversation, bool, error)
 	ListConversations(ctx context.Context, userID string, limit int) ([]domain.Conversation, error)
 	ListMessages(ctx context.Context, conversationID string, limit int) ([]domain.Message, error)
-	InsertMessageWithEvent(ctx context.Context, msg domain.Message, ev events.Envelope) error
+	InsertMessage(ctx context.Context, msg domain.Message, ev *events.Envelope) error
+	MarkRead(ctx context.Context, conversationID, readerID string, at time.Time) (int64, error)
 }
 
 // AdSource — чтение объявления (продавец = владелец) из Listing.
@@ -40,23 +41,39 @@ type AdSource interface {
 	GetAd(ctx context.Context, id string) (domain.AdView, bool, error)
 }
 
-// Service — use-cases чата.
-type Service struct {
-	store Store
-	ads   AdSource
-	now   func() time.Time
-	newID func() (string, error)
-	log   *slog.Logger
+// Presence — проверка онлайн-статуса получателя (кросс-реплично через backplane).
+type Presence interface {
+	Online(ctx context.Context, userID string) (bool, error)
 }
 
-// NewService создаёт сервис чата.
-func NewService(store Store, ads AdSource, log *slog.Logger) *Service {
+// Realtime — доставка кадров подключённым клиентам через backplane.
+type Realtime interface {
+	DeliverMessage(recipientID string, msg domain.Message)
+	NotifyRead(recipientID string, r domain.ReadReceipt)
+}
+
+// Service — use-cases чата.
+type Service struct {
+	store    Store
+	ads      AdSource
+	presence Presence
+	rt       Realtime
+	now      func() time.Time
+	newID    func() (string, error)
+	log      *slog.Logger
+}
+
+// NewService создаёт сервис чата. presence/rt отвечают за онлайн-гейтинг
+// Telegram-уведомления и realtime-доставку по WebSocket.
+func NewService(store Store, ads AdSource, presence Presence, rt Realtime, log *slog.Logger) *Service {
 	return &Service{
-		store: store,
-		ads:   ads,
-		now:   func() time.Time { return time.Now().UTC() },
-		newID: func() (string, error) { id, err := uuid.NewV7(); return id.String(), err },
-		log:   log,
+		store:    store,
+		ads:      ads,
+		presence: presence,
+		rt:       rt,
+		now:      func() time.Time { return time.Now().UTC() },
+		newID:    func() (string, error) { id, err := uuid.NewV7(); return id.String(), err },
+		log:      log,
 	}
 }
 
@@ -121,21 +138,71 @@ func (s *Service) SendMessage(ctx context.Context, conversationID, senderID, bod
 		ID: id, ConversationID: conversationID, SenderID: senderID,
 		Body: strings.TrimSpace(body), CreatedAt: s.now(),
 	}
-	// Событие адресату. В 7.1 публикуется на каждое сообщение (Notification →
-	// Telegram); гейтинг по онлайн-статусу получателя — 7.3.
-	ev, err := events.New(events.SubjectChatMessageSent, source, messageSentPayload{
-		UserID: recipient, ConversationID: conversationID,
-		AdID: conv.AdID, SenderID: senderID, MessageID: id,
-	})
-	if err != nil {
-		return domain.Message{}, "", fmt.Errorf("app: сборка bozor.chat.message_sent: %w", err)
+
+	// Онлайн-гейтинг (7.3): получателю онлайн доставляем по WS без Telegram; иначе
+	// публикуем bozor.chat.message_sent (Notification → Telegram). Ошибка проверки
+	// присутствия трактуется как «оффлайн» (лучше лишнее уведомление, чем немое).
+	online := false
+	if s.presence != nil {
+		online, err = s.presence.Online(ctx, recipient)
+		if err != nil {
+			s.log.WarnContext(ctx, "проверка присутствия", slog.String("error", err.Error()))
+			online = false
+		}
 	}
-	if err := s.store.InsertMessageWithEvent(ctx, msg, ev); err != nil {
+
+	var ev *events.Envelope
+	if !online {
+		e, err := events.New(events.SubjectChatMessageSent, source, messageSentPayload{
+			UserID: recipient, ConversationID: conversationID,
+			AdID: conv.AdID, SenderID: senderID, MessageID: id,
+		})
+		if err != nil {
+			return domain.Message{}, "", fmt.Errorf("app: сборка bozor.chat.message_sent: %w", err)
+		}
+		ev = &e
+	}
+
+	if err := s.store.InsertMessage(ctx, msg, ev); err != nil {
 		return domain.Message{}, "", err
 	}
+
+	// Realtime-доставка получателю (fire-and-forget; если не подключён — no-op).
+	if s.rt != nil {
+		s.rt.DeliverMessage(recipient, msg)
+	}
 	s.log.InfoContext(ctx, "сообщение отправлено",
-		slog.String("conversation_id", conversationID), slog.String("sender_id", senderID))
+		slog.String("conversation_id", conversationID), slog.String("sender_id", senderID),
+		slog.Bool("recipient_online", online))
 	return msg, recipient, nil
+}
+
+// MarkRead помечает прочитанными сообщения собеседника в диалоге и уведомляет его
+// (realtime), что сообщения прочитаны. Возвращает число помеченных. Доступно
+// только участнику диалога.
+func (s *Service) MarkRead(ctx context.Context, conversationID, readerID string) (int, error) {
+	conv, found, err := s.store.GetConversation(ctx, conversationID)
+	if err != nil {
+		return 0, err
+	}
+	if !found {
+		return 0, ErrConversationNotFound
+	}
+	if !conv.Participant(readerID) {
+		return 0, ErrNotParticipant
+	}
+	at := s.now()
+	n, err := s.store.MarkRead(ctx, conversationID, readerID, at)
+	if err != nil {
+		return 0, err
+	}
+	// Уведомляем автора прочитанных сообщений (второго участника).
+	if n > 0 && s.rt != nil {
+		s.rt.NotifyRead(conv.Counterpart(readerID), domain.ReadReceipt{
+			ConversationID: conversationID, ReaderID: readerID, At: at,
+		})
+	}
+	return int(n), nil
 }
 
 // ListConversations возвращает диалоги пользователя.

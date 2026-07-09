@@ -33,6 +33,7 @@ type Chat interface {
 	SendMessage(ctx context.Context, conversationID, senderID, body string) (domain.Message, string, error)
 	ListConversations(ctx context.Context, userID string, limit int) ([]domain.Conversation, error)
 	ListMessages(ctx context.Context, conversationID, userID string, limit int) ([]domain.Message, error)
+	MarkRead(ctx context.Context, conversationID, readerID string) (int, error)
 }
 
 // ConversationHandler обслуживает REST-историю и отправку сообщений чата.
@@ -59,6 +60,7 @@ type conversationDTO struct {
 	AdID          string `json:"ad_id"`
 	BuyerID       string `json:"buyer_id"`
 	SellerID      string `json:"seller_id"`
+	UnreadCount   int    `json:"unread_count"`
 	LastMessageAt string `json:"last_message_at"`
 	CreatedAt     string `json:"created_at"`
 }
@@ -121,6 +123,16 @@ func (h *ConversationHandler) Messages(w http.ResponseWriter, r *http.Request) {
 	httpx.Respond(w, http.StatusOK, map[string]any{"messages": out})
 }
 
+// Read помечает сообщения собеседника в диалоге прочитанными.
+func (h *ConversationHandler) Read(w http.ResponseWriter, r *http.Request) {
+	n, err := h.chat.MarkRead(r.Context(), chi.URLParam(r, "id"), authx.UserID(r.Context()))
+	if err != nil {
+		h.writeError(w, r, err)
+		return
+	}
+	httpx.Respond(w, http.StatusOK, map[string]int{"marked": n})
+}
+
 // Send отправляет сообщение в диалог от текущего пользователя.
 func (h *ConversationHandler) Send(w http.ResponseWriter, r *http.Request) {
 	var req sendRequest
@@ -139,6 +151,7 @@ func (h *ConversationHandler) Send(w http.ResponseWriter, r *http.Request) {
 func toConversationDTO(c domain.Conversation) conversationDTO {
 	return conversationDTO{
 		ID: c.ID, AdID: c.AdID, BuyerID: c.BuyerID, SellerID: c.SellerID,
+		UnreadCount:   c.UnreadCount,
 		LastMessageAt: c.LastMessageAt.UTC().Format(time.RFC3339),
 		CreatedAt:     c.CreatedAt.UTC().Format(time.RFC3339),
 	}

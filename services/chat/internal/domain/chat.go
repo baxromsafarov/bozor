@@ -29,6 +29,15 @@ type Conversation struct {
 	SellerID      string // владелец объявления
 	CreatedAt     time.Time
 	LastMessageAt time.Time
+	UnreadCount   int // непрочитанные для запросившего (заполняется в списке диалогов)
+}
+
+// ReadReceipt — отметка о прочтении: reader прочитал сообщения диалога до момента At.
+// Уведомляет отправителя (второго участника), что его сообщения прочитаны.
+type ReadReceipt struct {
+	ConversationID string
+	ReaderID       string
+	At             time.Time
 }
 
 // Message — сообщение диалога.

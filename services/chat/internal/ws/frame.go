@@ -7,15 +7,18 @@ import (
 	"bozor/services/chat/internal/domain"
 )
 
-// Типы кадров WebSocket (поле "type" в server→client).
+// Типы кадров WebSocket (поле "type").
 const (
-	frameMessage = "message" // новое сообщение диалога
+	frameMessage = "message" // новое сообщение диалога (server→client)
 	frameAck     = "ack"     // подтверждение отправки собственного сообщения
 	frameError   = "error"   // ошибка обработки клиентского кадра
+	frameRead    = "read"    // отметка о прочтении (в обе стороны)
 )
 
-// inbound — кадр client→server: отправка сообщения в диалог.
+// inbound — кадр client→server. type="read" — отметить диалог прочитанным;
+// иначе (пусто/"message") — отправка сообщения с телом body.
 type inbound struct {
+	Type           string `json:"type"`
 	ConversationID string `json:"conversation_id"`
 	Body           string `json:"body"`
 }
@@ -45,6 +48,14 @@ type outError struct {
 	Message string `json:"message"`
 }
 
+// outRead — кадр server→client: собеседник прочитал сообщения диалога.
+type outRead struct {
+	Type           string `json:"type"`
+	ConversationID string `json:"conversation_id"`
+	ReaderID       string `json:"reader_id"`
+	At             string `json:"at"`
+}
+
 // messageFrame сериализует сообщение в кадр доставки получателю.
 func messageFrame(m domain.Message) []byte {
 	b, _ := json.Marshal(outMessage{
@@ -66,5 +77,14 @@ func ackFrame(m domain.Message) []byte {
 // errorFrame сериализует ошибку обработки клиентского кадра.
 func errorFrame(code, message string) []byte {
 	b, _ := json.Marshal(outError{Type: frameError, Code: code, Message: message})
+	return b
+}
+
+// readFrame сериализует отметку о прочтении для автора прочитанных сообщений.
+func readFrame(r domain.ReadReceipt) []byte {
+	b, _ := json.Marshal(outRead{
+		Type: frameRead, ConversationID: r.ConversationID,
+		ReaderID: r.ReaderID, At: r.At.UTC().Format(time.RFC3339),
+	})
 	return b
 }

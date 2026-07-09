@@ -57,6 +57,14 @@ func (f *fakeBackplane) Subscribe(userID string, handler func([]byte)) (Subscrip
 	return fakeSub{f: f, userID: userID}, nil
 }
 
+func (f *fakeBackplane) RespondPresence(string) (Subscription, error) {
+	return noopSub{}, nil
+}
+
+type noopSub struct{}
+
+func (noopSub) Unsubscribe() error { return nil }
+
 // trigger имитирует приход backplane-сообщения для userID.
 func (f *fakeBackplane) trigger(userID string, payload []byte) {
 	f.mu.Lock()

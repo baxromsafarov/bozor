@@ -20,10 +20,12 @@ import (
 func discardLog() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
 
 type fakeChat struct {
-	startErr, sendErr, msgErr error
-	gotAdID, gotBuyer         string
-	gotConvID, gotSender      string
-	gotBody                   string
+	startErr, sendErr, msgErr, readErr error
+	gotAdID, gotBuyer                  string
+	gotConvID, gotSender               string
+	gotBody                            string
+	gotReadConv, gotReader             string
+	markN                              int
 }
 
 func (f *fakeChat) StartConversation(_ context.Context, adID, buyerID string) (domain.Conversation, error) {
@@ -53,6 +55,11 @@ func (f *fakeChat) ListMessages(_ context.Context, _, _ string, _ int) ([]domain
 		return nil, f.msgErr
 	}
 	return []domain.Message{{ID: "m1", SenderID: "b", Body: "hi", CreatedAt: time.Unix(2, 0).UTC()}}, nil
+}
+
+func (f *fakeChat) MarkRead(_ context.Context, convID, readerID string) (int, error) {
+	f.gotReadConv, f.gotReader = convID, readerID
+	return f.markN, f.readErr
 }
 
 // chatServer собирает роутер и проставляет проброшенные заголовки идентичности.
@@ -141,6 +148,24 @@ func TestList_OK(t *testing.T) {
 		http.MethodGet, "/api/v1/conversations", "")
 	require.Equal(t, http.StatusOK, rec.Code)
 	assert.Contains(t, rec.Body.String(), `"conversations"`)
+	assert.Contains(t, rec.Body.String(), `"unread_count"`)
+}
+
+func TestRead_OK(t *testing.T) {
+	fc := &fakeChat{markN: 4}
+	rec := do(t, chatServer(NewConversationHandler(fc, discardLog()), "buyer1"),
+		http.MethodPost, "/api/v1/conversations/c1/read", "")
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, "c1", fc.gotReadConv)
+	assert.Equal(t, "buyer1", fc.gotReader)
+	assert.Contains(t, rec.Body.String(), `"marked":4`)
+}
+
+func TestRead_NotParticipant_403(t *testing.T) {
+	fc := &fakeChat{readErr: app.ErrNotParticipant}
+	rec := do(t, chatServer(NewConversationHandler(fc, discardLog()), "stranger"),
+		http.MethodPost, "/api/v1/conversations/c1/read", "")
+	assert.Equal(t, http.StatusForbidden, rec.Code)
 }
 
 func TestMessages_OK(t *testing.T) {

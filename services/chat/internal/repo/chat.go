@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -61,13 +62,16 @@ func (r *Repo) GetConversation(ctx context.Context, id string) (domain.Conversat
 }
 
 // ListConversations возвращает диалоги пользователя (как покупателя и как
-// продавца), свежие сверху.
+// продавца), свежие сверху, с числом непрочитанных для запросившего (сообщения
+// собеседника без read_at).
 func (r *Repo) ListConversations(ctx context.Context, userID string, limit int) ([]domain.Conversation, error) {
 	rows, err := r.pool.Query(ctx, `
-		SELECT `+convColumns+`
-		FROM conversations
-		WHERE buyer_id = $1 OR seller_id = $1
-		ORDER BY last_message_at DESC
+		SELECT c.id, c.ad_id, c.buyer_id, c.seller_id, c.created_at, c.last_message_at,
+		       (SELECT count(*) FROM messages m
+		        WHERE m.conversation_id = c.id AND m.sender_id <> $1 AND m.read_at IS NULL) AS unread
+		FROM conversations c
+		WHERE c.buyer_id = $1 OR c.seller_id = $1
+		ORDER BY c.last_message_at DESC
 		LIMIT $2`, userID, limit)
 	if err != nil {
 		return nil, fmt.Errorf("repo: список диалогов: %w", err)
@@ -76,11 +80,11 @@ func (r *Repo) ListConversations(ctx context.Context, userID string, limit int) 
 
 	var out []domain.Conversation
 	for rows.Next() {
-		conv, err := scanConversation(rows)
-		if err != nil {
+		var c domain.Conversation
+		if err := rows.Scan(&c.ID, &c.AdID, &c.BuyerID, &c.SellerID, &c.CreatedAt, &c.LastMessageAt, &c.UnreadCount); err != nil {
 			return nil, fmt.Errorf("repo: скан диалога: %w", err)
 		}
-		out = append(out, conv)
+		out = append(out, c)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("repo: обход диалогов: %w", err)
@@ -118,9 +122,10 @@ func (r *Repo) ListMessages(ctx context.Context, conversationID string, limit in
 	return out, nil
 }
 
-// InsertMessageWithEvent сохраняет сообщение, двигает last_message_at диалога и
-// публикует bozor.chat.message_sent — всё одной транзакцией.
-func (r *Repo) InsertMessageWithEvent(ctx context.Context, msg domain.Message, ev events.Envelope) error {
+// InsertMessage сохраняет сообщение, двигает last_message_at диалога и — если ev
+// задано — публикует bozor.chat.message_sent, всё одной транзакцией. ev=nil, когда
+// получатель онлайн (доставка по WS, без Telegram-уведомления) — см. app.SendMessage.
+func (r *Repo) InsertMessage(ctx context.Context, msg domain.Message, ev *events.Envelope) error {
 	return pgxx.WithTx(ctx, r.pool, func(tx pgx.Tx) error {
 		_, err := tx.Exec(ctx, `
 			INSERT INTO messages (id, conversation_id, sender_id, body, created_at)
@@ -134,8 +139,24 @@ func (r *Repo) InsertMessageWithEvent(ctx context.Context, msg domain.Message, e
 			msg.ConversationID, msg.CreatedAt); err != nil {
 			return fmt.Errorf("repo: обновление last_message_at: %w", err)
 		}
-		return outbox.Enqueue(ctx, tx, ev)
+		if ev == nil {
+			return nil
+		}
+		return outbox.Enqueue(ctx, tx, *ev)
 	})
+}
+
+// MarkRead помечает прочитанными сообщения собеседника в диалоге (sender_id ≠
+// readerID, read_at IS NULL). Возвращает число помеченных.
+func (r *Repo) MarkRead(ctx context.Context, conversationID, readerID string, at time.Time) (int64, error) {
+	tag, err := r.pool.Exec(ctx, `
+		UPDATE messages SET read_at = $3
+		WHERE conversation_id = $1 AND sender_id <> $2 AND read_at IS NULL`,
+		conversationID, readerID, at)
+	if err != nil {
+		return 0, fmt.Errorf("repo: отметка прочтения: %w", err)
+	}
+	return tag.RowsAffected(), nil
 }
 
 // scanConversation читает строку диалога (поддерживает *pgxpool.Row и pgx.Rows).

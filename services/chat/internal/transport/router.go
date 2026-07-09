@@ -59,6 +59,7 @@ func NewRouter(d Deps) http.Handler {
 			api.Get("/api/v1/conversations", d.Conversations.List)
 			api.Get("/api/v1/conversations/{id}/messages", d.Conversations.Messages)
 			api.Post("/api/v1/conversations/{id}/messages", d.Conversations.Send)
+			api.Post("/api/v1/conversations/{id}/read", d.Conversations.Read)
 		})
 	}
 

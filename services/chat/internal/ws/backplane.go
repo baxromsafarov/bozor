@@ -10,6 +10,10 @@ import "github.com/nats-io/nats.go"
 // subjectPrefix — префикс realtime-subject получателя (chat.rt.<userID>).
 const subjectPrefix = "chat.rt."
 
+// presencePrefix — префикс subject запроса присутствия (chat.presence.<userID>).
+// Реплика с подключением пользователя отвечает на запрос → пользователь онлайн.
+const presencePrefix = "chat.presence."
+
 // Subscription — подписка backplane, которую Hub отменяет при отключении
 // последнего соединения пользователя.
 type Subscription interface {
@@ -23,6 +27,9 @@ type Backplane interface {
 	// Subscribe подписывает реплику на сообщения для userID; handler вызывается
 	// на каждое доставленное сообщение.
 	Subscribe(userID string, handler func([]byte)) (Subscription, error)
+	// RespondPresence подписывает реплику отвечать на запросы присутствия userID
+	// (пока он подключён здесь), чтобы отправитель узнал онлайн-статус получателя.
+	RespondPresence(userID string) (Subscription, error)
 }
 
 // NATSBackplane — реализация backplane поверх NATS core pub/sub (эфемерная
@@ -44,4 +51,9 @@ func (b *NATSBackplane) Publish(userID string, payload []byte) error {
 // Subscribe подписывается на chat.rt.<userID>; *nats.Subscription реализует Subscription.
 func (b *NATSBackplane) Subscribe(userID string, handler func([]byte)) (Subscription, error) {
 	return b.nc.Subscribe(subjectPrefix+userID, func(m *nats.Msg) { handler(m.Data) })
+}
+
+// RespondPresence отвечает пустым сообщением на запросы chat.presence.<userID>.
+func (b *NATSBackplane) RespondPresence(userID string) (Subscription, error) {
+	return b.nc.Subscribe(presencePrefix+userID, func(m *nats.Msg) { _ = m.Respond(nil) })
 }
