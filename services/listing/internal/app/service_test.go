@@ -34,6 +34,8 @@ type fakeStore struct {
 	byUser      [4]string         // {userID, status, limit, offset} из ListByUser
 	exportAfter string            // after из ListActiveFull
 	exportLimit int               // limit из ListActiveFull
+	bumpedID    string            // id из BumpWithEvent
+	bumpResult  bool              // что вернёт BumpWithEvent (по умолчанию false)
 }
 
 func (f *fakeStore) CreateWithEvent(_ context.Context, a domain.Ad, ev events.Envelope) error {
@@ -88,6 +90,15 @@ func (f *fakeStore) ListByUser(_ context.Context, userID, status string, limit, 
 func (f *fakeStore) ListActiveFull(_ context.Context, after string, limit int) ([]domain.Ad, error) {
 	f.exportAfter, f.exportLimit = after, limit
 	return f.list, nil
+}
+
+func (f *fakeStore) BumpWithEvent(_ context.Context, adID string, _ time.Time, ev events.Envelope) (bool, error) {
+	f.bumpedID = adID
+	if !f.bumpResult {
+		return false, nil
+	}
+	f.events = append(f.events, ev)
+	return true, nil
 }
 
 func itoa(n int) string { return strconv.Itoa(n) }

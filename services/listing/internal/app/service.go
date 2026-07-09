@@ -30,6 +30,7 @@ type Store interface {
 	TransitionWithEvent(ctx context.Context, adID string, upd domain.StatusUpdate, ev events.Envelope) error
 	UpdateWithEvent(ctx context.Context, a domain.Ad, ev events.Envelope) error
 	DeleteWithEvent(ctx context.Context, adID string, ev events.Envelope) error
+	BumpWithEvent(ctx context.Context, adID string, bumpedAt time.Time, ev events.Envelope) (bool, error)
 	ListActive(ctx context.Context, f domain.FeedFilter) ([]domain.Ad, error)
 	ListByUser(ctx context.Context, userID, status string, limit, offset int) ([]domain.Ad, error)
 	ListActiveFull(ctx context.Context, after string, limit int) ([]domain.Ad, error)
@@ -441,4 +442,26 @@ func NewAdEvent(a domain.Ad) AdEvent {
 		RegionID: a.RegionID, Price: a.Price, Currency: a.Currency, Title: a.Title,
 		PublishedAt: a.PublishedAt, ExpiresAt: a.ExpiresAt,
 	}
+}
+
+// AdBumpEvent — нагрузка bozor.ad.bumped: id объявления и момент поднятия.
+// Индексатор Search использует только ad_id (читает актуальный bumped_at из
+// Listing), bumped_at передаётся для наблюдаемости и потребителей уведомлений.
+type AdBumpEvent struct {
+	AdID     string    `json:"ad_id"`
+	BumpedAt time.Time `json:"bumped_at"`
+}
+
+// Bump поднимает объявление в ленте: выставляет bumped_at=now у активного
+// объявления и публикует bozor.ad.bumped одной транзакцией. Возвращает false,
+// если объявления нет или оно не активно (поднимать нечего — идемпотентный
+// пропуск). Вызывается внутренним эндпоинтом по триггеру воркера авто-поднятий
+// Payments (Stage 8.5); Search переиндексирует по событию.
+func (s *Service) Bump(ctx context.Context, adID string) (bool, error) {
+	bumpedAt := time.Now().UTC()
+	ev, err := events.New(events.SubjectAdBumped, source, AdBumpEvent{AdID: adID, BumpedAt: bumpedAt})
+	if err != nil {
+		return false, err
+	}
+	return s.store.BumpWithEvent(ctx, adID, bumpedAt, ev)
 }

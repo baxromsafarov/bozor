@@ -34,6 +34,7 @@ import (
 	"bozor/services/payments/internal/provider/payme"
 	"bozor/services/payments/internal/repo"
 	"bozor/services/payments/internal/transport"
+	"bozor/services/payments/internal/worker"
 	"bozor/services/payments/migrations"
 )
 
@@ -125,6 +126,17 @@ func run() error {
 	// категории объявления (читается из Listing), списание с кошелька, активация.
 	listing := listingclient.New(cfg.ListingInternalURL, config.ListingTimeout)
 	promotionSvc := app.NewPromotionService(listing, store, store, store, log)
+
+	// Воркер авто-поднятий (Stage 8.5): по расписанию BUMP-услуг поднимает
+	// объявления, дёргая внутренний эндпоинт Listing (он же публикует bozor.ad.bumped).
+	bumper := worker.NewBumper(store, listing, cfg.BumpInterval, cfg.BumpBatch, log)
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		if err := bumper.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
+			log.Error("воркер авто-поднятий остановлен с ошибкой", slog.String("error", err.Error()))
+		}
+	}()
 
 	router := transport.NewRouter(transport.Deps{
 		Log:            log,

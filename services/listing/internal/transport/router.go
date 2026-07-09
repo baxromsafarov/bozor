@@ -60,6 +60,8 @@ func NewRouter(d Deps) http.Handler {
 	// не под /api/v1 (gateway их не проксирует наружу — только внутренняя сеть).
 	r.Get("/internal/ads/export", d.Handler.ExportList)
 	r.Get("/internal/ads/{id}", d.Handler.ExportGet)
+	// Поднятие объявления по триггеру воркера авто-поднятий Payments (Stage 8.5).
+	r.Post("/internal/ads/{id}/bump", d.Handler.Bump)
 
 	notFound := func(w http.ResponseWriter, req *http.Request) {
 		httpx.WriteProblem(w, req, apperr.New(apperr.KindNotFound, "not_found",

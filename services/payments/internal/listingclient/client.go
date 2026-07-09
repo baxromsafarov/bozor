@@ -68,3 +68,30 @@ func (c *Client) GetAd(ctx context.Context, id string) (domain.AdView, bool, err
 		return domain.AdView{}, false, fmt.Errorf("listingclient: get %q status %d: %s", id, resp.StatusCode, body)
 	}
 }
+
+// Bump поднимает объявление в ленте через внутренний эндпоинт Listing
+// (POST /internal/ads/{id}/bump): Listing выставляет bumped_at и публикует
+// bozor.ad.bumped. Возвращает bumped=true при 200; false при 404 (объявления нет
+// или оно не активно — поднимать нечего, день считается исполненным). На прочих
+// статусах и сетевых сбоях — ошибка (день будет освобождён для повторной попытки).
+func (c *Client) Bump(ctx context.Context, id string) (bool, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/internal/ads/"+id+"/bump", nil)
+	if err != nil {
+		return false, fmt.Errorf("listingclient: сборка запроса поднятия: %w", err)
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return false, fmt.Errorf("listingclient: запрос поднятия: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	body, _ := io.ReadAll(resp.Body)
+
+	switch resp.StatusCode {
+	case http.StatusOK:
+		return true, nil
+	case http.StatusNotFound:
+		return false, nil
+	default:
+		return false, fmt.Errorf("listingclient: bump %q status %d: %s", id, resp.StatusCode, body)
+	}
+}

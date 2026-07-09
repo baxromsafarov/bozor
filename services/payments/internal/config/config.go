@@ -15,6 +15,12 @@ const dbName = "bozor_payments"
 
 const defaultAddr = ":8080"
 
+// Параметры воркера авто-поднятий (Stage 8.5).
+const (
+	defaultBumpInterval = 1 * time.Minute // период проверки созревших поднятий
+	defaultBumpBatch    = 100             // сколько поднятий исполняется за проход
+)
+
 // Config — конфигурация Payments/Promotions-сервиса.
 type Config struct {
 	Addr     string
@@ -32,6 +38,10 @@ type Config struct {
 	// ListingInternalURL — базовый URL внутреннего read-эндпоинта Listing
 	// (при покупке услуги читается объявление: владелец, регион/категория, статус).
 	ListingInternalURL string
+
+	// Параметры воркера авто-поднятий (Stage 8.5).
+	BumpInterval time.Duration // период проверки созревших поднятий
+	BumpBatch    int           // размер пакета исполняемых поднятий за проход
 
 	// Реквизиты провайдеров оплаты (для проверки колбэков и ссылок оплаты).
 	PaymeMerchantID string
@@ -62,6 +72,8 @@ func Load() (*Config, error) {
 			config.String("POSTGRES_PORT", "5432")),
 		NATSURL:            config.String("NATS_URL", "nats://nats:4222"),
 		ListingInternalURL: config.String("LISTING_INTERNAL_URL", "http://listing-ads:8080"),
+		BumpInterval:       config.Duration("PAYMENTS_BUMP_INTERVAL", defaultBumpInterval),
+		BumpBatch:          config.Int("PAYMENTS_BUMP_BATCH", defaultBumpBatch),
 		PaymeMerchantID:    config.String("PAYME_MERCHANT_ID", "payme-merchant-dev"),
 		PaymeKey:           config.String("PAYME_KEY", "payme-key-dev"),
 		ClickServiceID:     config.String("CLICK_SERVICE_ID", "click-service-dev"),

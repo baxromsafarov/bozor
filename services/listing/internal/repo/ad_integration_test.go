@@ -112,6 +112,36 @@ func TestListingRepo_TransitionWithEvent(t *testing.T) {
 	assert.Equal(t, 1, countSubject(t, ctx, pool, events.SubjectAdUpdated), "конфликтный переход не плодит событий")
 }
 
+func TestListingRepo_BumpWithEvent(t *testing.T) {
+	ctx := context.Background()
+	pool := startDB(t)
+	r := repo.NewRepo(pool)
+
+	// Активное объявление поднимается: bumped_at выставляется, событие в outbox.
+	active := seedAd(t, ctx, r, domain.StatusActive, nil)
+	at := time.Now().UTC().Truncate(time.Second)
+	bumped, err := r.BumpWithEvent(ctx, active.ID, at, eventOf(t, events.SubjectAdBumped, active.ID))
+	require.NoError(t, err)
+	assert.True(t, bumped)
+
+	got, err := r.GetByID(ctx, active.ID)
+	require.NoError(t, err)
+	require.NotNil(t, got.BumpedAt)
+	assert.WithinDuration(t, at, got.BumpedAt.UTC(), time.Second)
+	assert.Equal(t, 1, countSubject(t, ctx, pool, events.SubjectAdBumped))
+
+	// Неактивное (draft) не поднимается: false, без изменения bumped_at и без события.
+	draft := seedAd(t, ctx, r, domain.StatusDraft, nil)
+	bumped, err = r.BumpWithEvent(ctx, draft.ID, at, eventOf(t, events.SubjectAdBumped, draft.ID))
+	require.NoError(t, err)
+	assert.False(t, bumped, "неактивное объявление не поднимается")
+
+	gotDraft, err := r.GetByID(ctx, draft.ID)
+	require.NoError(t, err)
+	assert.Nil(t, gotDraft.BumpedAt)
+	assert.Equal(t, 1, countSubject(t, ctx, pool, events.SubjectAdBumped), "без события для неактивного")
+}
+
 func TestListingRepo_ApplyModeration_Idempotent(t *testing.T) {
 	ctx := context.Background()
 	pool := startDB(t)

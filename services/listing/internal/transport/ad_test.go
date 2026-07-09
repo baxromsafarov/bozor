@@ -37,6 +37,8 @@ type fakeService struct {
 	gotLimit   int
 	gotOffset  int
 	gotAfter   string
+	bumpResult bool
+	bumpErr    error
 }
 
 func (f *fakeService) Create(_ context.Context, in app.CreateInput) (domain.Ad, error) {
@@ -117,6 +119,11 @@ func (f *fakeService) Renew(_ context.Context, adID, userID string) (domain.Ad, 
 
 func (f *fakeService) Archive(_ context.Context, adID, userID string) (domain.Ad, error) {
 	return f.lifecycle(adID, userID)
+}
+
+func (f *fakeService) Bump(_ context.Context, adID string) (bool, error) {
+	f.gotAdID = adID
+	return f.bumpResult, f.bumpErr
 }
 
 func newRouter(svc Service) http.Handler {
@@ -355,6 +362,21 @@ func TestExportGet_NotFound(t *testing.T) {
 	svc := &fakeService{getErr: domain.ErrAdNotFound}
 	rec := do(t, newRouter(svc), http.MethodGet, "/internal/ads/nope", "", "")
 	assert.Equal(t, http.StatusNotFound, rec.Code)
+}
+
+func TestBump_OK(t *testing.T) {
+	svc := &fakeService{bumpResult: true}
+	rec := do(t, newRouter(svc), http.MethodPost, "/internal/ads/ad-1/bump", "", "")
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, "ad-1", svc.gotAdID)
+	assert.Contains(t, rec.Body.String(), "bumped")
+}
+
+func TestBump_NotActive_404(t *testing.T) {
+	svc := &fakeService{bumpResult: false}
+	rec := do(t, newRouter(svc), http.MethodPost, "/internal/ads/ad-1/bump", "", "")
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Contains(t, rec.Body.String(), "ad_not_bumpable")
 }
 
 func TestExportList_Keyset(t *testing.T) {

@@ -70,3 +70,12 @@ type PromotionItem struct {
 
 // IsTopService сообщает, является ли услуга топовой (для флага is_top в поиске).
 func IsTopService(code string) bool { return code == ServiceTop }
+
+// DueBump — созревший день авто-поднятия: услуга (promotion) и смещение дня в её
+// расписании, у которого наступил момент поднятия (starts_at + day*24ч ≤ now) и
+// который ещё не был исполнен. Воркер Stage 8.5 поднимает объявление для каждого.
+type DueBump struct {
+	PromotionID string
+	AdID        string
+	DayOffset   int
+}

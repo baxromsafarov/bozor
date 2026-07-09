@@ -6,6 +6,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"bozor/pkg/shared/apperr"
 	"bozor/pkg/shared/httpx"
 
 	"bozor/services/listing/internal/domain"
@@ -69,6 +70,23 @@ func (h *Handler) ExportList(w http.ResponseWriter, r *http.Request) {
 		resp.NextAfter = resp.Ads[n-1].ID
 	}
 	httpx.Respond(w, http.StatusOK, resp)
+}
+
+// Bump поднимает объявление в ленте (bumped_at=now) и публикует bozor.ad.bumped.
+// Внутренний эндпоинт (не под /api/v1): вызывается воркером авто-поднятий Payments
+// (Stage 8.5). 200 — поднято; 404 — объявления нет или оно не активно (пропуск).
+func (h *Handler) Bump(w http.ResponseWriter, r *http.Request) {
+	bumped, err := h.svc.Bump(r.Context(), chi.URLParam(r, "id"))
+	if err != nil {
+		h.writeAdError(w, r, err)
+		return
+	}
+	if !bumped {
+		httpx.WriteProblem(w, r, apperr.New(apperr.KindNotFound, "ad_not_bumpable",
+			"Объявление не найдено или не активно", "E'lon topilmadi yoki faol emas"))
+		return
+	}
+	httpx.Respond(w, http.StatusOK, map[string]string{"status": "bumped"})
 }
 
 // toExport строит полную проекцию объявления.

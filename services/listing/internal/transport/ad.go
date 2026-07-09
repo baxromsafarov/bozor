@@ -38,6 +38,7 @@ type Service interface {
 	Archive(ctx context.Context, adID, userID string) (domain.Ad, error)
 	ExportByID(ctx context.Context, id string) (domain.Ad, error)
 	ExportActive(ctx context.Context, after string, limit int) ([]domain.Ad, error)
+	Bump(ctx context.Context, adID string) (bool, error)
 }
 
 // Handler обслуживает эндпоинты объявлений.

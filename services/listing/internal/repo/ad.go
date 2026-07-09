@@ -197,6 +197,32 @@ func (r *Repo) ExpireWithEvent(ctx context.Context, adID string, ev events.Envel
 	return expired, err
 }
 
+// BumpWithEvent поднимает объявление в ленте: выставляет bumped_at указанному
+// моменту у активного объявления и публикует bozor.ad.bumped в outbox — одной
+// транзакцией. Только active-объявление поднимается (гонка с истечением/снятием
+// исключена условием status='active'). Возвращает false без события, если
+// объявления нет или оно не активно. Триггерится воркером авто-поднятий Payments
+// (Stage 8.5): Listing — владелец bumped_at, поэтому он же публикует событие,
+// чтобы индексатор Search прочитал уже обновлённое значение (fetch-current-state).
+func (r *Repo) BumpWithEvent(ctx context.Context, adID string, bumpedAt time.Time, ev events.Envelope) (bool, error) {
+	var bumped bool
+	err := pgxx.WithTx(ctx, r.pool, func(tx pgx.Tx) error {
+		tag, err := tx.Exec(ctx, `
+			UPDATE ads SET bumped_at = $2, updated_at = now()
+			WHERE id = $1 AND status = 'active'
+		`, adID, bumpedAt)
+		if err != nil {
+			return fmt.Errorf("repo: поднятие объявления: %w", err)
+		}
+		if tag.RowsAffected() == 0 {
+			return nil // нет объявления или не активно — пропуск без события
+		}
+		bumped = true
+		return outbox.Enqueue(ctx, tx, ev)
+	})
+	return bumped, err
+}
+
 // AddViews прибавляет накопленные просмотры к объявлениям одним batch-UPDATE
 // (id → дельта). Несуществующие объявления просто не совпадают и отбрасываются.
 // Устраняет write-hotspot: поток просмотров популярной карточки сливается пачкой.
