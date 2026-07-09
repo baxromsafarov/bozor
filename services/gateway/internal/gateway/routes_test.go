@@ -62,3 +62,39 @@ func TestRoutes_AdsSearchPrecedence(t *testing.T) {
 		})
 	}
 }
+
+// TestRoutes_MeAdsPrecedence проверяет, что /api/v1/me/ads уходит в listing-ads,
+// а /api/v1/me и /api/v1/me/notification-prefs — в user-profile.
+func TestRoutes_MeAdsPrecedence(t *testing.T) {
+	profile := newEchoBackend()
+	defer profile.server.Close()
+	listing := newEchoBackend()
+	defer listing.server.Close()
+
+	router := newMultiUpstreamRouter(t, map[string]string{
+		"user-profile": profile.server.URL,
+		"listing-ads":  listing.server.URL,
+	})
+
+	cases := []struct {
+		path        string
+		wantProfile int64
+		wantListing int64
+	}{
+		{"/api/v1/me", 1, 0},
+		{"/api/v1/me/notification-prefs", 1, 0},
+		{"/api/v1/me/ads", 0, 1},
+		{"/api/v1/me/ads?status=active", 0, 1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.path, func(t *testing.T) {
+			profile.calls.Store(0)
+			listing.calls.Store(0)
+			rec := httptest.NewRecorder()
+			router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, tc.path, nil))
+			require.Equal(t, http.StatusOK, rec.Code)
+			assert.Equal(t, tc.wantProfile, profile.calls.Load(), "вызовы user-profile")
+			assert.Equal(t, tc.wantListing, listing.calls.Load(), "вызовы listing")
+		})
+	}
+}

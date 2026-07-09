@@ -43,6 +43,9 @@ services:
   search:
     ports:
       - "127.0.0.1:8086:8080"   # прямой доступ к search (dev)
+  user-profile:
+    ports:
+      - "127.0.0.1:8087:8080"   # прямой доступ к user-profile (dev)
   grafana:
     ports:
       - "127.0.0.1:3000:3000"   # UI Grafana

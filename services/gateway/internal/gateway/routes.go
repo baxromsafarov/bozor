@@ -10,11 +10,14 @@ type Route struct {
 // сервисы. Полный путь (с префиксом /api/v1) проксируется как есть —
 // версионирование обрабатывают сами сервисы.
 //
-// Детализация вложенных путей (например, /me/ads → listing-ads) уточняется
-// по мере реализации сервисов; сейчас /me/* целиком идёт в user-profile.
+// Детализация вложенных путей разводится более специфичными префиксами: chi
+// (radix-trie) отдаёт приоритет статическому сегменту независимо от порядка, так
+// /me/ads уходит в listing-ads, а /me и /me/notification-prefs — в user-profile.
 var Routes = []Route{
 	{Prefix: "/api/v1/auth", Service: "auth"},
 	{Prefix: "/api/v1/users", Service: "user-profile"},
+	// Мои объявления — в Listing (более специфично, чем /me → user-profile).
+	{Prefix: "/api/v1/me/ads", Service: "listing-ads"},
 	{Prefix: "/api/v1/me", Service: "user-profile"},
 	{Prefix: "/api/v1/categories", Service: "catalog"},
 	{Prefix: "/api/v1/attributes", Service: "catalog"},

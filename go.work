@@ -9,4 +9,5 @@ use (
 	./services/location
 	./services/media
 	./services/search
+	./services/user-profile
 )
