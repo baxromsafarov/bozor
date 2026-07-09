@@ -1315,4 +1315,33 @@ Stage 7.3 — доставка и статусы чата (ARCHITECTURE §4.9, R
 
 ---
 
+## ADR-037: Chat модерация и лимиты — per-user rate-limit отправки, бан-проекция (забаненный не пишет), снятие сообщения модератором (bozor.chat.message_blocked)
+
+**Дата:** 2026-07-10 · **Статус:** принято · **Глава:** 7.4
+
+### Контекст
+
+Stage 7.4 завершает CHAPTER 7 (ARCHITECTURE §4.9, ROADMAP 7.4): rate-limit отправки, жалоба на сообщение → Moderation, блокировка пользователя в чате. Вопросы: (1) как ограничить частоту отправки при том, что WS обходит per-request rate-limit gateway; (2) как не дать забаненному писать (его access-JWT валиден до 15 мин после бана); (3) как снять сообщение по жалобе.
+
+### Решение
+
+**(1) Per-user token-bucket in-process (выбрано).** `ratelimit.UserLimiter` — по `golang.org/x/time/rate` на пользователя (по умолчанию 1/сек, burst 5), с фоновой очисткой неактивных. Проверяется в `app.SendMessage` (общий путь REST+WS) → превышение = `ErrRateLimited` → 429/кадр ошибки. Лимит действует на реплику; для чата достаточно: клиент держит одно WS-соединение к одной реплике (nginx sticky), а глобальную защиту REST даёт rate-limit gateway. Redis-backed лимит отклонён как избыточный для этого этапа.
+
+**(2) Бан-проекция в Chat + запрет отправки (выбрано).** Chat потребляет `bozor.user.banned` (консьюмер `chat-ban`, inbox-идемпотентно) и проецирует в таблицу `banned_users`. `SendMessage` и `StartConversation` проверяют `IsBanned` → `ErrUserBanned` (403). Это закрывает окно, пока не истёк access-токен забаненного (Auth уже отозвал refresh-токены — ADR-033, но access живёт до 15 мин). Разбан (удаление строки) — на будущее.
+
+**(3) Снятие сообщения через `bozor.chat.message_blocked` (выбрано).** Жалоба на сообщение подаётся существующим `POST /api/v1/reports` (target_type=message, 6.4). Moderation теперь допускает takedown для сообщения (не только объявления): `takedownEvent` для message публикует `bozor.chat.message_blocked {message_id, reason}`. Chat потребляет (консьюмер `chat-message-block`, inbox) → `blocked_at` у сообщения; чтение скрывает тело (`BlockedBody`). Внутренний `GET /internal/messages/{id}` даёт модерации текст сообщения (как `/internal/ads` у Listing). Takedown к пользователю по-прежнему запрещён — для пользователя есть бан.
+
+### Детали решения
+
+- Chat: миграция 00002 (`messages.blocked_at`, `banned_users`, `processed_events` — Chat теперь консьюмер); `ratelimit` (per-user bucket + janitor); `worker.Moderator` (HandleBan/HandleBlock, inbox); repo (BanUser/IsBanned/BlockMessage/GetMessage со скрытием тела/inbox); app (Limiter-зависимость, guard'ы бана в Send/Start, GetMessage); transport (429 rate_limited, 403 user_banned, `GET /internal/messages/{id}`); config `CHAT_RATE_PER_SEC/BURST`; main — два консьюмера + limiter.
+- Moderation: `ValidateAction` допускает takedown для ad|message (не user); `takedownEvent` ветвится ad→bozor.ad.blocked / message→bozor.chat.message_blocked.
+- Событие: `bozor.chat.message_blocked` в каталоге subjects.
+
+### Последствия
+
+- CHAPTER 7 завершён: двое переписываются по объявлению (REST+WS, cross-replica), оффлайн→Telegram, прочтение/непрочитанные, а теперь модерация и лимиты. Проверено вживую: (1) снятие сообщения — buyer отправил и пожаловался (target_type=message) → staff takedown → `bozor.chat.message_blocked` → Chat скрыл (`GET /internal/messages` до: тело видно/blocked=false; после: `[сообщение удалено модератором]`/blocked=true); (2) rate-limit — 9 быстрых отправок дали 5×201 (burst) затем 4×429; (3) бан — B2 начал диалог и написал (ок), staff забанил через `/moderation/bans` → `bozor.user.banned` → Chat спроецировал в `banned_users`, далее отправка и старт диалога → 403 user_banned. Unit + integration (chat: ban/block/скрытие тела/inbox; moderation: message-takedown→bozor.chat.message_blocked; worker: HandleBan/HandleBlock идемпотентны) зелёные, lint 0 (chat+moderation).
+- **Условия пересмотра:** разбан (удаление из banned_users по событию); Redis-backed кросс-репличный rate-limit при масштабировании; shadow-бан (скрытие сообщений без ведома); модерация текста сообщений авто-стопсловами (как объявления 6.2); ping/pong keepalive и лимит числа соединений на пользователя; выдача причины бана пользователю.
+
+---
+
 *Конец журнала. Новые решения добавляются в конец с очередным номером ADR.*

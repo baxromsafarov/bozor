@@ -93,12 +93,12 @@ func (r *Repo) ListConversations(ctx context.Context, userID string, limit int) 
 }
 
 // ListMessages возвращает последние limit сообщений диалога в хронологическом
-// порядке (старые → новые).
+// порядке (старые → новые). Тело снятых модератором сообщений скрыто.
 func (r *Repo) ListMessages(ctx context.Context, conversationID string, limit int) ([]domain.Message, error) {
 	rows, err := r.pool.Query(ctx, `
-		SELECT id, conversation_id, sender_id, body, created_at, read_at
+		SELECT id, conversation_id, sender_id, body, created_at, read_at, blocked_at
 		FROM (
-			SELECT id, conversation_id, sender_id, body, created_at, read_at
+			SELECT id, conversation_id, sender_id, body, created_at, read_at, blocked_at
 			FROM messages WHERE conversation_id = $1
 			ORDER BY created_at DESC LIMIT $2
 		) sub
@@ -110,8 +110,8 @@ func (r *Repo) ListMessages(ctx context.Context, conversationID string, limit in
 
 	var out []domain.Message
 	for rows.Next() {
-		var m domain.Message
-		if err := rows.Scan(&m.ID, &m.ConversationID, &m.SenderID, &m.Body, &m.CreatedAt, &m.ReadAt); err != nil {
+		m, err := scanMessage(rows)
+		if err != nil {
 			return nil, fmt.Errorf("repo: скан сообщения: %w", err)
 		}
 		out = append(out, m)
@@ -120,6 +120,38 @@ func (r *Repo) ListMessages(ctx context.Context, conversationID string, limit in
 		return nil, fmt.Errorf("repo: обход сообщений: %w", err)
 	}
 	return out, nil
+}
+
+// GetMessage возвращает сообщение по id (для внутреннего чтения модерацией).
+func (r *Repo) GetMessage(ctx context.Context, id string) (domain.Message, bool, error) {
+	row := r.pool.QueryRow(ctx, `
+		SELECT id, conversation_id, sender_id, body, created_at, read_at, blocked_at
+		FROM messages WHERE id = $1`, id)
+	m, err := scanMessage(row)
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		return domain.Message{}, false, nil
+	case err != nil:
+		return domain.Message{}, false, fmt.Errorf("repo: чтение сообщения %s: %w", id, err)
+	}
+	return m, true, nil
+}
+
+// scanMessage читает строку сообщения (поддерживает pgx.Row и pgx.Rows) и
+// скрывает тело снятых сообщений.
+func scanMessage(row pgx.Row) (domain.Message, error) {
+	var (
+		m         domain.Message
+		blockedAt *time.Time
+	)
+	if err := row.Scan(&m.ID, &m.ConversationID, &m.SenderID, &m.Body, &m.CreatedAt, &m.ReadAt, &blockedAt); err != nil {
+		return domain.Message{}, err
+	}
+	if blockedAt != nil {
+		m.Blocked = true
+		m.Body = domain.BlockedBody
+	}
+	return m, nil
 }
 
 // InsertMessage сохраняет сообщение, двигает last_message_at диалога и — если ev
@@ -164,4 +196,45 @@ func scanConversation(row pgx.Row) (domain.Conversation, error) {
 	var c domain.Conversation
 	err := row.Scan(&c.ID, &c.AdID, &c.BuyerID, &c.SellerID, &c.CreatedAt, &c.LastMessageAt)
 	return c, err
+}
+
+// BanUser проецирует бан пользователя (из bozor.user.banned) — забаненный не пишет.
+func (r *Repo) BanUser(ctx context.Context, userID, reason string) error {
+	_, err := r.pool.Exec(ctx, `
+		INSERT INTO banned_users (user_id, reason) VALUES ($1, $2)
+		ON CONFLICT (user_id) DO UPDATE SET reason = EXCLUDED.reason`, userID, reason)
+	if err != nil {
+		return fmt.Errorf("repo: проекция бана %s: %w", userID, err)
+	}
+	return nil
+}
+
+// IsBanned сообщает, забанен ли пользователь.
+func (r *Repo) IsBanned(ctx context.Context, userID string) (bool, error) {
+	var exists bool
+	err := r.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM banned_users WHERE user_id = $1)`, userID).Scan(&exists)
+	if err != nil {
+		return false, fmt.Errorf("repo: проверка бана %s: %w", userID, err)
+	}
+	return exists, nil
+}
+
+// BlockMessage снимает сообщение (модератором): проставляет blocked_at. Идемпотентно.
+func (r *Repo) BlockMessage(ctx context.Context, messageID string) error {
+	_, err := r.pool.Exec(ctx, `
+		UPDATE messages SET blocked_at = now() WHERE id = $1 AND blocked_at IS NULL`, messageID)
+	if err != nil {
+		return fmt.Errorf("repo: снятие сообщения %s: %w", messageID, err)
+	}
+	return nil
+}
+
+// IsEventProcessed сообщает, обрабатывал ли consumer событие eventID (inbox).
+func (r *Repo) IsEventProcessed(ctx context.Context, consumer, eventID string) (bool, error) {
+	return outbox.AlreadyProcessed(ctx, r.pool, consumer, eventID)
+}
+
+// MarkEventProcessed помечает событие обработанным (inbox).
+func (r *Repo) MarkEventProcessed(ctx context.Context, consumer, eventID string) error {
+	return outbox.MarkProcessed(ctx, r.pool, consumer, eventID)
 }

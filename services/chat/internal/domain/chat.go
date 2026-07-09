@@ -11,6 +11,9 @@ import (
 // BodyMaxLen — максимум символов (рун) в одном сообщении.
 const BodyMaxLen = 4000
 
+// BlockedBody — текст, подставляемый вместо снятого модератором сообщения.
+const BlockedBody = "[сообщение удалено модератором]"
+
 // Доменные ошибки чата.
 var (
 	ErrSelfConversation     = errors.New("нельзя начать диалог с самим собой")
@@ -19,6 +22,9 @@ var (
 	ErrNotParticipant       = errors.New("пользователь не участник диалога")
 	ErrConversationNotFound = errors.New("диалог не найден")
 	ErrAdNotFound           = errors.New("объявление не найдено")
+	ErrRateLimited          = errors.New("слишком часто — превышен лимит отправки")
+	ErrUserBanned           = errors.New("пользователь заблокирован")
+	ErrMessageNotFound      = errors.New("сообщение не найдено")
 )
 
 // Conversation — диалог покупатель↔продавец по объявлению.
@@ -48,6 +54,7 @@ type Message struct {
 	Body           string
 	CreatedAt      time.Time
 	ReadAt         *time.Time
+	Blocked        bool // снято модератором — тело скрыто (см. BlockedBody)
 }
 
 // Participant сообщает, участвует ли пользователь в диалоге.

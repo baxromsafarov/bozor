@@ -39,7 +39,8 @@ const (
 	SubjectMediaDeleted   = "bozor.media.deleted"   // объект удалён/осиротел
 
 	// Чат.
-	SubjectChatMessageSent = "bozor.chat.message_sent"
+	SubjectChatMessageSent    = "bozor.chat.message_sent"
+	SubjectChatMessageBlocked = "bozor.chat.message_blocked" // снятие сообщения модератором по жалобе
 
 	// Продвижение и платежи.
 	SubjectPromotionActivated = "bozor.promotion.activated"

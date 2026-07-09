@@ -94,6 +94,10 @@ func (f *fakeStore) ListConversations(_ context.Context, _ string, _ int) ([]dom
 func (f *fakeStore) ListMessages(_ context.Context, _ string, _ int) ([]domain.Message, error) {
 	return nil, nil
 }
+func (f *fakeStore) GetMessage(_ context.Context, _ string) (domain.Message, bool, error) {
+	return domain.Message{}, false, nil
+}
+func (f *fakeStore) IsBanned(_ context.Context, _ string) (bool, error) { return false, nil }
 func (f *fakeStore) InsertMessage(_ context.Context, _ domain.Message, _ *events.Envelope) error {
 	return nil
 }
@@ -104,6 +108,10 @@ func (f *fakeStore) MarkRead(_ context.Context, _, _ string, _ time.Time) (int64
 type fakePresence struct{ online bool }
 
 func (f fakePresence) Online(context.Context, string) (bool, error) { return f.online, nil }
+
+type allowLimiter struct{}
+
+func (allowLimiter) Allow(string) bool { return true }
 
 func testLog() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
 
@@ -118,7 +126,7 @@ func mint(t *testing.T, userID string) string {
 func wsServer(t *testing.T, store *fakeStore, online bool) *httptest.Server {
 	t.Helper()
 	hub := NewHub(newLoopback(), testLog())
-	svc := app.NewService(store, nil, fakePresence{online: online}, NewDelivery(hub), testLog())
+	svc := app.NewService(store, nil, fakePresence{online: online}, NewDelivery(hub), allowLimiter{}, testLog())
 	h := NewHandler(context.Background(), hub, svc, []byte(testKey), testLog())
 	srv := httptest.NewServer(http.HandlerFunc(h.ServeWS))
 	t.Cleanup(srv.Close)

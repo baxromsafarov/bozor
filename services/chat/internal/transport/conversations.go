@@ -34,6 +34,7 @@ type Chat interface {
 	ListConversations(ctx context.Context, userID string, limit int) ([]domain.Conversation, error)
 	ListMessages(ctx context.Context, conversationID, userID string, limit int) ([]domain.Message, error)
 	MarkRead(ctx context.Context, conversationID, readerID string) (int, error)
+	GetMessage(ctx context.Context, id string) (domain.Message, error)
 }
 
 // ConversationHandler обслуживает REST-историю и отправку сообщений чата.
@@ -184,6 +185,15 @@ func (h *ConversationHandler) writeError(w http.ResponseWriter, r *http.Request,
 	case errors.Is(err, app.ErrSelfConversation):
 		httpx.WriteProblem(w, r, apperr.New(apperr.KindInvalid, "self_conversation",
 			"Нельзя написать самому себе", "O'zingizga yozib bo'lmaydi"))
+	case errors.Is(err, app.ErrMessageNotFound):
+		httpx.WriteProblem(w, r, apperr.New(apperr.KindNotFound, "message_not_found",
+			"Сообщение не найдено", "Xabar topilmadi"))
+	case errors.Is(err, app.ErrUserBanned):
+		httpx.WriteProblem(w, r, apperr.New(apperr.KindForbidden, "user_banned",
+			"Аккаунт заблокирован", "Hisob bloklangan"))
+	case errors.Is(err, app.ErrRateLimited):
+		httpx.WriteProblem(w, r, apperr.New(apperr.KindRateLimited, "rate_limited",
+			"Слишком часто, подождите", "Juda tez-tez, kuting"))
 	case errors.Is(err, domain.ErrEmptyBody):
 		httpx.WriteProblem(w, r, apperr.New(apperr.KindInvalid, "empty_body",
 			"Пустое сообщение", "Bo'sh xabar"))

@@ -27,8 +27,10 @@ import (
 	"bozor/services/chat/internal/app"
 	"bozor/services/chat/internal/config"
 	"bozor/services/chat/internal/listingclient"
+	"bozor/services/chat/internal/ratelimit"
 	"bozor/services/chat/internal/repo"
 	"bozor/services/chat/internal/transport"
+	"bozor/services/chat/internal/worker"
 	"bozor/services/chat/internal/ws"
 	"bozor/services/chat/migrations"
 )
@@ -118,12 +120,30 @@ func run() error {
 	// realtime-доставка кадров. baseCtx (ctx сигналов) закрывает соединения при
 	// остановке сервиса.
 	hub := ws.NewHub(ws.NewNATSBackplane(nc), log)
-	chatSvc := app.NewService(store, listing, ws.NewPresence(nc), ws.NewDelivery(hub), log)
+	limiter := ratelimit.New(ctx, float64(cfg.RatePerSec), cfg.RateBurst)
+	chatSvc := app.NewService(store, listing, ws.NewPresence(nc), ws.NewDelivery(hub), limiter, log)
 	wsHandler := ws.NewHandler(ctx, hub, chatSvc, cfg.JWTSigningKey, log)
+
+	// Консьюмеры модерации чата: bozor.user.banned (забаненный не пишет) и
+	// bozor.chat.message_blocked (снятие сообщения). Идемпотентны через inbox.
+	mod := worker.New(store, log)
+	ccBan, err := natsx.Consume(ctx, js, events.StreamName, worker.BanConsumer,
+		[]string{events.SubjectUserBanned}, 3, mod.HandleBan)
+	if err != nil {
+		return fmt.Errorf("консьюмер банов: %w", err)
+	}
+	defer ccBan.Stop()
+	ccBlock, err := natsx.Consume(ctx, js, events.StreamName, worker.BlockConsumer,
+		[]string{events.SubjectChatMessageBlocked}, 3, mod.HandleBlock)
+	if err != nil {
+		return fmt.Errorf("консьюмер снятия сообщений: %w", err)
+	}
+	defer ccBlock.Stop()
 
 	router := transport.NewRouter(transport.Deps{
 		Log:            log,
 		Conversations:  transport.NewConversationHandler(chatSvc, log),
+		Internal:       transport.NewInternalHandler(chatSvc, log),
 		WS:             wsHandler,
 		MetricsHandler: metricsHandler,
 		ReadyChecks: map[string]httpx.Check{

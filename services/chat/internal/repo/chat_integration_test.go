@@ -202,6 +202,49 @@ func TestListConversations_ByParticipant(t *testing.T) {
 	assert.Equal(t, cA.ID, buyerConvs[0].ID)
 }
 
+// TestBanAndBlock — проекция бана, снятие сообщения скрывает тело, inbox.
+func TestBanAndBlock(t *testing.T) {
+	ctx := context.Background()
+	pool := startDB(t)
+	r := repo.NewRepo(pool)
+
+	// Бан пользователя (идемпотентно).
+	userID := newID(t)
+	require.NoError(t, r.BanUser(ctx, userID, "спам"))
+	require.NoError(t, r.BanUser(ctx, userID, "спам"))
+	banned, err := r.IsBanned(ctx, userID)
+	require.NoError(t, err)
+	assert.True(t, banned)
+	other, err := r.IsBanned(ctx, newID(t))
+	require.NoError(t, err)
+	assert.False(t, other)
+
+	// Снятие сообщения: тело скрывается в чтении.
+	adID, buyer, seller := newID(t), newID(t), newID(t)
+	c, err := r.EnsureConversation(ctx, conv(t, adID, buyer, seller))
+	require.NoError(t, err)
+	msg := domain.Message{ID: newID(t), ConversationID: c.ID, SenderID: buyer, Body: "запрещёнка", CreatedAt: time.Now().UTC()}
+	require.NoError(t, r.InsertMessage(ctx, msg, chatEvent(t, seller)))
+
+	require.NoError(t, r.BlockMessage(ctx, msg.ID))
+	got, found, err := r.GetMessage(ctx, msg.ID)
+	require.NoError(t, err)
+	require.True(t, found)
+	assert.True(t, got.Blocked)
+	assert.Equal(t, domain.BlockedBody, got.Body, "тело снятого сообщения скрыто")
+
+	// В списке диалога снятое сообщение тоже скрыто.
+	msgs, err := r.ListMessages(ctx, c.ID, 10)
+	require.NoError(t, err)
+	require.Len(t, msgs, 1)
+	assert.Equal(t, domain.BlockedBody, msgs[0].Body)
+
+	// inbox-идемпотентность.
+	processed, err := r.IsEventProcessed(ctx, "chat-ban", newID(t))
+	require.NoError(t, err)
+	assert.False(t, processed)
+}
+
 // TestListMessages_Chronological — история возвращается старые→новые.
 func TestListMessages_Chronological(t *testing.T) {
 	ctx := context.Background()

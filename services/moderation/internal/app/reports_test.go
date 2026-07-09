@@ -100,6 +100,14 @@ func TestResolveReport_Takedown_PublishesBlock(t *testing.T) {
 	assert.Contains(t, store.resolvedResolution, "контрафакт")
 }
 
+func TestResolveReport_TakedownMessage_PublishesMessageBlocked(t *testing.T) {
+	store := &fakeOpsStore{report: domain.Report{Status: domain.ReportOpen, TargetType: domain.TargetMessage, TargetID: "msg1"}, found: true, applied: true}
+	// AdSource не должен вызываться для сообщения — передаём пустой источник.
+	require.NoError(t, opsSvc(store, fakeAdSource{}).ResolveReport(context.Background(), "r1", "mod1", domain.ActionTakedown, "оскорбление"))
+	assert.Equal(t, domain.ReportResolved, store.resolvedStatus)
+	assert.Equal(t, events.SubjectChatMessageBlocked, store.resolveEventType)
+}
+
 func TestResolveReport_TakedownOnUser_Rejected(t *testing.T) {
 	store := &fakeOpsStore{report: domain.Report{Status: domain.ReportOpen, TargetType: domain.TargetUser}, found: true}
 	err := opsSvc(store, fakeAdSource{}).ResolveReport(context.Background(), "r1", "mod1", domain.ActionTakedown, "x")

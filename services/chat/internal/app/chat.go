@@ -24,6 +24,9 @@ var (
 	ErrNotParticipant       = domain.ErrNotParticipant
 	ErrAdNotFound           = domain.ErrAdNotFound
 	ErrSelfConversation     = domain.ErrSelfConversation
+	ErrRateLimited          = domain.ErrRateLimited
+	ErrUserBanned           = domain.ErrUserBanned
+	ErrMessageNotFound      = domain.ErrMessageNotFound
 )
 
 // Store — доступ к диалогам/сообщениям (реализуется repo.Repo).
@@ -32,8 +35,15 @@ type Store interface {
 	GetConversation(ctx context.Context, id string) (domain.Conversation, bool, error)
 	ListConversations(ctx context.Context, userID string, limit int) ([]domain.Conversation, error)
 	ListMessages(ctx context.Context, conversationID string, limit int) ([]domain.Message, error)
+	GetMessage(ctx context.Context, id string) (domain.Message, bool, error)
 	InsertMessage(ctx context.Context, msg domain.Message, ev *events.Envelope) error
 	MarkRead(ctx context.Context, conversationID, readerID string, at time.Time) (int64, error)
+	IsBanned(ctx context.Context, userID string) (bool, error)
+}
+
+// Limiter — per-user лимит частоты отправки (реализуется ratelimit.UserLimiter).
+type Limiter interface {
+	Allow(userID string) bool
 }
 
 // AdSource — чтение объявления (продавец = владелец) из Listing.
@@ -58,19 +68,21 @@ type Service struct {
 	ads      AdSource
 	presence Presence
 	rt       Realtime
+	limiter  Limiter
 	now      func() time.Time
 	newID    func() (string, error)
 	log      *slog.Logger
 }
 
 // NewService создаёт сервис чата. presence/rt отвечают за онлайн-гейтинг
-// Telegram-уведомления и realtime-доставку по WebSocket.
-func NewService(store Store, ads AdSource, presence Presence, rt Realtime, log *slog.Logger) *Service {
+// Telegram-уведомления и realtime-доставку; limiter — лимит частоты отправки.
+func NewService(store Store, ads AdSource, presence Presence, rt Realtime, limiter Limiter, log *slog.Logger) *Service {
 	return &Service{
 		store:    store,
 		ads:      ads,
 		presence: presence,
 		rt:       rt,
+		limiter:  limiter,
 		now:      func() time.Time { return time.Now().UTC() },
 		newID:    func() (string, error) { id, err := uuid.NewV7(); return id.String(), err },
 		log:      log,
@@ -90,6 +102,13 @@ type messageSentPayload struct {
 // StartConversation создаёт (или возвращает существующий) диалог покупателя с
 // продавцом объявления. Инициатор всегда покупатель; продавец — владелец объявления.
 func (s *Service) StartConversation(ctx context.Context, adID, buyerID string) (domain.Conversation, error) {
+	banned, err := s.store.IsBanned(ctx, buyerID)
+	if err != nil {
+		return domain.Conversation{}, err
+	}
+	if banned {
+		return domain.Conversation{}, ErrUserBanned
+	}
 	ad, found, err := s.ads.GetAd(ctx, adID)
 	if err != nil {
 		return domain.Conversation{}, err
@@ -118,6 +137,16 @@ func (s *Service) StartConversation(ctx context.Context, adID, buyerID string) (
 func (s *Service) SendMessage(ctx context.Context, conversationID, senderID, body string) (domain.Message, string, error) {
 	if err := domain.ValidateBody(body); err != nil {
 		return domain.Message{}, "", err
+	}
+	if s.limiter != nil && !s.limiter.Allow(senderID) {
+		return domain.Message{}, "", ErrRateLimited
+	}
+	banned, err := s.store.IsBanned(ctx, senderID)
+	if err != nil {
+		return domain.Message{}, "", err
+	}
+	if banned {
+		return domain.Message{}, "", ErrUserBanned
 	}
 	conv, found, err := s.store.GetConversation(ctx, conversationID)
 	if err != nil {
@@ -208,6 +237,19 @@ func (s *Service) MarkRead(ctx context.Context, conversationID, readerID string)
 // ListConversations возвращает диалоги пользователя.
 func (s *Service) ListConversations(ctx context.Context, userID string, limit int) ([]domain.Conversation, error) {
 	return s.store.ListConversations(ctx, userID, limit)
+}
+
+// GetMessage возвращает сообщение по id (внутреннее чтение модерацией). Тело
+// снятого сообщения уже скрыто на уровне repo.
+func (s *Service) GetMessage(ctx context.Context, id string) (domain.Message, error) {
+	m, found, err := s.store.GetMessage(ctx, id)
+	if err != nil {
+		return domain.Message{}, err
+	}
+	if !found {
+		return domain.Message{}, ErrMessageNotFound
+	}
+	return m, nil
 }
 
 // ListMessages возвращает историю диалога — только участнику.

@@ -35,6 +35,10 @@ type Config struct {
 	// JWTSigningKey — ключ проверки подписи access-JWT. WebSocket-эндпоинт /ws
 	// идёт мимо gateway (nginx→chat), поэтому чат сам проверяет токен.
 	JWTSigningKey []byte
+
+	// RatePerSec/RateBurst — лимит отправки сообщений на пользователя (сообщений/сек и всплеск).
+	RatePerSec int
+	RateBurst  int
 }
 
 // Load читает конфигурацию из окружения (fail-fast на обязательных ключах).
@@ -59,6 +63,8 @@ func Load() (*Config, error) {
 		NATSURL:            config.String("NATS_URL", "nats://nats:4222"),
 		ListingInternalURL: config.String("LISTING_INTERNAL_URL", "http://listing-ads:8080"),
 		JWTSigningKey:      []byte(config.String("JWT_SIGNING_KEY", "")),
+		RatePerSec:         config.Int("CHAT_RATE_PER_SEC", 1),
+		RateBurst:          config.Int("CHAT_RATE_BURST", 5),
 	}, nil
 }
 

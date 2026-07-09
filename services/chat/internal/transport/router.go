@@ -23,6 +23,7 @@ type WSHandler interface {
 type Deps struct {
 	Log            *slog.Logger
 	Conversations  *ConversationHandler
+	Internal       *InternalHandler
 	WS             WSHandler
 	ReadyChecks    map[string]httpx.Check
 	MetricsHandler http.Handler
@@ -48,6 +49,12 @@ func NewRouter(d Deps) http.Handler {
 	// обработчик сам аутентифицирует соединение по JWT.
 	if d.WS != nil {
 		r.Get("/ws", d.WS.ServeWS)
+	}
+
+	// Внутренний read-эндпоинт (только внутренняя сеть) — модерация читает текст
+	// сообщения по жалобе.
+	if d.Internal != nil {
+		r.Get("/internal/messages/{id}", d.Internal.Message)
 	}
 
 	// Чат — любой аутентифицированный пользователь (доступ к своим диалогам).

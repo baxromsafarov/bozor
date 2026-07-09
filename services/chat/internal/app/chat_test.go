@@ -30,6 +30,9 @@ type fakeStore struct {
 	getErr       error
 	markN        int64
 	markedReader string
+	banned       bool
+	msg          domain.Message
+	msgFound     bool
 }
 
 func (f *fakeStore) EnsureConversation(_ context.Context, conv domain.Conversation) (domain.Conversation, error) {
@@ -61,6 +64,14 @@ func (f *fakeStore) InsertMessage(_ context.Context, msg domain.Message, ev *eve
 func (f *fakeStore) MarkRead(_ context.Context, _, readerID string, _ time.Time) (int64, error) {
 	f.markedReader = readerID
 	return f.markN, nil
+}
+
+func (f *fakeStore) GetMessage(_ context.Context, _ string) (domain.Message, bool, error) {
+	return f.msg, f.msgFound, nil
+}
+
+func (f *fakeStore) IsBanned(_ context.Context, _ string) (bool, error) {
+	return f.banned, nil
 }
 
 type fakeAds struct {
@@ -96,8 +107,13 @@ func (f *fakeRT) NotifyRead(recipientID string, r domain.ReadReceipt) {
 	f.readTo, f.readReceipt = recipientID, r
 }
 
+// fakeLimiter — управляемый лимитер (allow=true пропускает всё).
+type fakeLimiter struct{ allow bool }
+
+func (f fakeLimiter) Allow(string) bool { return f.allow }
+
 func newSvc(store *fakeStore, ads fakeAds, presence app.Presence, rt app.Realtime) *app.Service {
-	return app.NewService(store, ads, presence, rt, discardLog())
+	return app.NewService(store, ads, presence, rt, fakeLimiter{allow: true}, discardLog())
 }
 
 // --- StartConversation ---
@@ -192,6 +208,44 @@ func TestSendMessage_EmptyBodyRejected(t *testing.T) {
 	svc := newSvc(&fakeStore{}, fakeAds{}, fakePresence{}, &fakeRT{})
 	_, _, err := svc.SendMessage(context.Background(), "c1", "buyer1", "   ")
 	assert.ErrorIs(t, err, domain.ErrEmptyBody, "пустое тело не читает диалог")
+}
+
+func TestSendMessage_BannedRejected(t *testing.T) {
+	store := &fakeStore{conv: domain.Conversation{ID: "c1", BuyerID: "buyer1", SellerID: "seller1"}, found: true, banned: true}
+	svc := newSvc(store, fakeAds{}, fakePresence{}, &fakeRT{})
+	_, _, err := svc.SendMessage(context.Background(), "c1", "buyer1", "привет")
+	assert.ErrorIs(t, err, app.ErrUserBanned)
+	assert.Nil(t, store.insertedEv, "забаненный не пишет")
+}
+
+func TestSendMessage_RateLimited(t *testing.T) {
+	store := &fakeStore{conv: domain.Conversation{ID: "c1", BuyerID: "buyer1", SellerID: "seller1"}, found: true}
+	svc := app.NewService(store, fakeAds{}, fakePresence{}, &fakeRT{}, fakeLimiter{allow: false}, discardLog())
+	_, _, err := svc.SendMessage(context.Background(), "c1", "buyer1", "привет")
+	assert.ErrorIs(t, err, app.ErrRateLimited)
+	assert.Nil(t, store.insertedEv, "превышен лимит — сообщение не сохранено")
+}
+
+// --- StartConversation ban ---
+
+func TestStartConversation_BannedRejected(t *testing.T) {
+	svc := newSvc(&fakeStore{banned: true}, fakeAds{ad: domain.AdView{UserID: "seller1"}, found: true}, fakePresence{}, &fakeRT{})
+	_, err := svc.StartConversation(context.Background(), "ad1", "buyer1")
+	assert.ErrorIs(t, err, app.ErrUserBanned)
+}
+
+// --- GetMessage ---
+
+func TestGetMessage_FoundAndNotFound(t *testing.T) {
+	store := &fakeStore{msg: domain.Message{ID: "m1", Body: "текст"}, msgFound: true}
+	svc := newSvc(store, fakeAds{}, fakePresence{}, &fakeRT{})
+	m, err := svc.GetMessage(context.Background(), "m1")
+	require.NoError(t, err)
+	assert.Equal(t, "текст", m.Body)
+
+	svc2 := newSvc(&fakeStore{msgFound: false}, fakeAds{}, fakePresence{}, &fakeRT{})
+	_, err = svc2.GetMessage(context.Background(), "x")
+	assert.ErrorIs(t, err, app.ErrMessageNotFound)
 }
 
 // --- MarkRead ---

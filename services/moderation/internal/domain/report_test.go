@@ -19,8 +19,9 @@ func TestValidateReportInput(t *testing.T) {
 func TestValidateAction(t *testing.T) {
 	assert.NoError(t, domain.ValidateAction(domain.ActionDismiss, domain.TargetUser))
 	assert.NoError(t, domain.ValidateAction(domain.ActionTakedown, domain.TargetAd))
+	assert.NoError(t, domain.ValidateAction(domain.ActionTakedown, domain.TargetMessage), "снятие применимо и к сообщению")
 	assert.ErrorIs(t, domain.ValidateAction("nuke", domain.TargetAd), domain.ErrInvalidAction)
-	// takedown применим только к объявлению.
+	// takedown к пользователю — недопустим (для пользователя есть бан).
 	assert.ErrorIs(t, domain.ValidateAction(domain.ActionTakedown, domain.TargetUser), domain.ErrTakedownTarget)
 }
 

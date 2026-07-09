@@ -73,6 +73,12 @@ type blockedPayload struct {
 	Reason string `json:"reason"`
 }
 
+// messageBlockedPayload — payload bozor.chat.message_blocked (снятие сообщения).
+type messageBlockedPayload struct {
+	MessageID string `json:"message_id"`
+	Reason    string `json:"reason"`
+}
+
 // userBannedPayload — payload bozor.user.banned.
 type userBannedPayload struct {
 	UserID string     `json:"user_id"`
@@ -149,9 +155,9 @@ func (s *OpsService) ResolveReport(ctx context.Context, reportID, moderatorID, a
 	return nil
 }
 
-// takedownEvent строит bozor.ad.blocked для takedown (обогащая владельцем/заголовком
-// из Listing); для прочих действий — nil. В отличие от bozor.ad.rejected (возврат
-// подачи на доработку), blocked снимает объявление из любого статуса, включая active.
+// takedownEvent строит событие снятия для takedown (для прочих действий — nil):
+// объявление → bozor.ad.blocked (обогащая владельцем/заголовком из Listing, снятие
+// из любого статуса), сообщение → bozor.chat.message_blocked (Chat скрывает тело).
 func (s *OpsService) takedownEvent(ctx context.Context, action string, rep domain.Report, note string) (*events.Envelope, error) {
 	if action != domain.ActionTakedown {
 		return nil, nil
@@ -160,6 +166,17 @@ func (s *OpsService) takedownEvent(ctx context.Context, action string, rep domai
 	if reason == "" {
 		reason = "снято по жалобе"
 	}
+
+	if rep.TargetType == domain.TargetMessage {
+		ev, err := events.New(events.SubjectChatMessageBlocked, source, messageBlockedPayload{
+			MessageID: rep.TargetID, Reason: reason,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("app: сборка bozor.chat.message_blocked (takedown): %w", err)
+		}
+		return &ev, nil
+	}
+
 	ad, found, err := s.source.GetAd(ctx, rep.TargetID)
 	if err != nil {
 		return nil, err

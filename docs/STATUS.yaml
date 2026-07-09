@@ -1,13 +1,17 @@
-status_id: "20260710-050000"
+status_id: "20260710-053000"
 project: "Bozor"
 version: "1.0"
 
 current:
-  chapter: "7"                     # CHAPTER 7: Chat
-  stage: "7.4"                     # STAGE 7.4: модерация и лимиты чата
+  chapter: "8"                     # CHAPTER 8: Payments & Promotions
+  stage: "8.1"                     # STAGE 8.1: промо-услуги (top/lift/highlight)
   status: "not_started"
 
 completed:
+  - stage_id: "7.4"
+    title: "Chat модерация и лимиты — per-user rate-limit отправки, бан-проекция (забаненный не пишет), снятие сообщения модератором (bozor.chat.message_blocked); CHAPTER 7 завершён"
+    completed_date: "2026-07-10"
+    evidence: "Модерация и лимиты чата (ADR-037; ARCHITECTURE §4.9; завершение CHAPTER 7). Миграция chat 00002: messages += blocked_at (снятое сообщение — тело скрыто), banned_users (проекция банов), processed_events (inbox — Chat теперь консьюмер). Rate-limit: internal/ratelimit.UserLimiter — per-user token-bucket (golang.org/x/time/rate, деф. 1/сек burst 5, фоновая очистка неактивных до отмены ctx); app.SendMessage проверяет limiter.Allow (общий путь REST+WS) → ErrRateLimited; лимит на реплику (клиент держит одно WS к одной реплике [nginx sticky], REST глобально лимитит gateway). Бан: worker.Moderator консьюмер chat-ban на bozor.user.banned (inbox-идемпотентно) → repo.BanUser проецирует в banned_users; app.SendMessage и StartConversation проверяют IsBanned → ErrUserBanned (закрывает окно пока не истёк access-JWT забаненного, ~15мин; Auth уже отозвал refresh — ADR-033). Снятие сообщения: жалоба подаётся существующим POST /api/v1/reports (target_type=message, 6.4); Moderation domain.ValidateAction теперь допускает takedown для ad|message (не user — для пользователя бан); app.takedownEvent ветвится ad→bozor.ad.blocked / message→bozor.chat.message_blocked {message_id,reason}; Chat консьюмер chat-message-block на bozor.chat.message_blocked (inbox) → repo.BlockMessage проставляет blocked_at; чтение (ListMessages/GetMessage) скрывает тело (domain.BlockedBody '[сообщение удалено модератором]'). Внутренний GET /internal/messages/{id} (без auth, только внутр. сеть — как /internal/ads Listing) даёт модерации текст сообщения. transport: 429 rate_limited (apperr.KindRateLimited), 403 user_banned, InternalHandler. config: CHAT_RATE_PER_SEC/BURST. main: два консьюмера (natsx.Consume maxDeliver=3) + ratelimit.New(ctx). events: subject bozor.chat.message_blocked. Тесты: unit chat (app: бан-отказ Send+Start, rate-limit отказ, GetMessage found/not-found; worker: HandleBan/HandleBlock проекция+inbox-идемпотентность+пустой id→ошибка; transport: 429/403/internal 200/404; ratelimit) + moderation (domain ValidateAction takedown для message ok/user reject; app takedown message→bozor.chat.message_blocked) + integration chat (BanUser идемпотентно+IsBanned, BlockMessage скрывает тело в GetMessage и ListMessages, inbox) — go test PASS (unit + integration ~17s chat); golangci-lint 0 issues (chat+moderation); gofmt чисто. Живая проверка (chat+moderation пересобраны healthy, миграция 00002 applied=1): (1) снятие сообщения — buyer отправил сообщение (GET /internal/messages: тело видно, blocked=false), пожаловался target_type=message → staff takedown → bozor.chat.message_blocked → Chat скрыл (GET /internal: body='[сообщение удалено модератором]', blocked=true); (2) rate-limit — 9 быстрых REST-отправок → 5×201 (burst) затем 4×429; (3) бан — B2 начал диалог и написал (201), staff забанил через POST /moderation/bans (permanent) → bozor.user.banned → Chat спроецировал в banned_users (count=1), далее B2 отправка→403 user_banned (RFC 7807), старт нового диалога→403. Прим.: разбан (удаление из banned_users), Redis-backed кросс-репличный rate-limit, shadow-бан, авто-стопслова в сообщениях, ping/pong keepalive, лимит соединений на пользователя — на будущее; CHAPTER 7 (Chat) полностью завершён (7.1 REST-история + 7.2 WebSocket/backplane + 7.3 доставка/статусы + 7.4 модерация/лимиты)"
   - stage_id: "7.3"
     title: "Chat доставка и статусы — онлайн-гейтинг Telegram по присутствию (NATS request-reply), доставка в app-слое (REST+WS единообразно), отметки о прочтении (read_at) и счётчики непрочитанных"
     completed_date: "2026-07-10"
@@ -151,9 +155,9 @@ completed:
     evidence: "services/location (модуль bozor/services/location в go.work). Миграции: 00001 схема (regions: id smallint PK, slug UNIQUE, name_uz/name_ru, lat/lon, sort_order; cities: id PK, region_id FK ON DELETE CASCADE, slug UNIQUE, имена/гео/sort, индекс по region_id,sort_order) + 00002 идемпотентный сид (ADR-007, ON CONFLICT DO UPDATE): 14 первичных регионов (12 областей + г.Ташкент + Респ. Каракалпакстан) и 56 городов/районов с реальными координатами WGS84 — включая 12 районов Ташкента и по 2–4 города на регион (апострофы в узбекских названиях экранированы: Farg'ona, Qo'qon, Qoraqalpog'iston и т.д.). Слой: domain (Region/City, lat/lon *float64, ErrRegionNotFound), repo (Regions/CitiesByRegion/RegionExists через pgx, ORDER BY sort_order), app (Service; Cities → 404 при несуществующем регионе, пустой список = регион без городов), transport (chi + middleware pkg/shared, GET /api/v1/locations/regions, GET /api/v1/locations/regions/{id}/cities; 422 на нечисловой id). Config: только DSN (app→PgBouncer, migrate→Postgres напрямую, ADR-013). Миграции при старте через pkg/shared/migrate. Dockerfile build-local go.work → distroless nonroot, healthcheck /location -health. Compose: сервис location + dev-порт 8082 + scrape-job prometheus. Тесты: unit (config DSN, transport regions/cities/404/422/not-found) + integration на testcontainers postgres (14 регионов, 56 городов, 12 районов Ташкента, апостроф Farg'ona, RegionExists, пустой список для чужого региона) — go test -tags=integration PASS (6.7s); golangci-lint 0 issues (default+integration). Живая проверка (15 контейнеров): миграции applied=2, рестарт→applied=0 (идемпотентно); /readyz ready; напрямую и через gateway (routing /api/v1/locations→location): 14 регионов (первый — г.Ташкент), 12 районов Ташкента, апостроф Farg'ona корректен, Самарканд/Каттакурган/Ургут; 404 неизвестный регион, 422 нечисловой id; Prometheus up{job=location}=1"
 
 next_actions:
-  - "Stage 7.4: модерация и лимиты чата — rate-limit отправки сообщений (на пользователя/диалог); жалоба на сообщение target_type=message → Moderation (задел ADR-033: reports уже принимают message; нужен путь получения текста сообщения из Chat); блокировка пользователя в чате (забаненный не пишет — учесть bozor.user.banned); ping/pong keepalive и лимиты числа соединений на пользователя; CHAPTER 7 DoD"
-  - "CHAPTER 8 (Payments/Promotions): промо-услуги (top/lift/highlight), провайдеры Payme/Click/Mock, bozor.promotion.activated/bozor.payment.* (Notification/Search уже потребляют is_top/promotion_rank — задел 4.4)"
-  - "CHAPTER 8 (Payments/Promotions): промо-услуги (top/lift/highlight), провайдеры Payme/Click/Mock, bozor.promotion.activated/bozor.payment.* (Notification/Search уже потребляют is_top/promotion_rank — задел 4.4)"
+  - "Stage 8.1: каталог промо-услуг и ценообразование — сид услуг TOP (7/30 дней), VIP (7 дней), BUMP, LOGO (30 дней) + наборы EASY_START/FAST_SALE/TURBO_SALE; таблица pricing (регион × категория × длительность, суммы в UZS); публичный GET каталога услуг/цен; новый сервис payments-promotions (БД bozor_payments, dev-порт 8093 — 8092 занят chat)"
+  - "CHAPTER 8 (Payments/Promotions) далее: 8.2 кошелёк/леджер (wallets, wallet_transactions, GET /me/wallet, POST /wallet/topup); 8.3 провайдеры Payme/Click/Mock (PaymentProvider{CreateInvoice;HandleCallback}, идемпотентные колбэки); 8.4 применение услуг (ad_promotions, POST /ads/{id}/promote, saga списание→активация→компенсация); 8.5 воркер авто-поднятий (bozor.ad.bumped→переиндексация); 8.6 ротация Топа (макс 5 TOP/категория); 8.7 возвраты"
+  - "Задел под Топ уже есть: Search top-блок (ADR-026, is_top/promotion_rank в схеме с 4.1), Notification/Search потребляют is_top/promotion_rank (4.4); bozor.ad.bumped переиндексация — как bozor.ad.updated в индексаторе (ADR-024)"
 
 decisions:                         # краткие ссылки; полные ADR — в DECISIONS.md
   - decision: "Брокер — NATS JetStream (не Kafka) ради лёгкости на Compose"
@@ -272,10 +276,10 @@ tech_stack:
   deploy: ["Docker Compose", "nginx"]
 
 metrics:
-  completed_stages: 35
+  completed_stages: 36
   total_stages: 52
-  completion_percentage: 67
-  estimated_remaining_stages: 17
-  chapters_completed: ["0", "1", "2", "3", "4", "5", "6"]   # CHAPTER 0-6 завершены; CHAPTER 7 (Chat) в работе: 7.1 REST + 7.2 WebSocket/backplane + 7.3 доставка/статусы готовы, остался 7.4 модерация/лимиты
+  completion_percentage: 69
+  estimated_remaining_stages: 16
+  chapters_completed: ["0", "1", "2", "3", "4", "5", "6", "7"]   # CHAPTER 0-7 завершены; CHAPTER 8 (Payments/Promotions) начинается с 8.1
 
 notes: "Backend-only, фронтенда нет. Целевая нагрузка: десятки тысяч DAU. Автономный режим работы подтверждён заказчиком. Коммиты — от имени baxromsafarov. Окружение: Windows 11, Go 1.26.4, Docker Desktop 29.2.1 + Compose v5, golangci-lint 2.12.2, goose, buf. Нюанс: локально go test без -race (нет cgo на Windows); -race выполняется в CI на Ubuntu. goconst min-occurrences=5. Инфра-нюансы (Stage 0.3): postgres:18 монтирует /var/lib/postgresql (не .../data); healthcheck typesense — через bash /dev/tcp (нет curl/wget/nc в образе). Локальный .env создаётся из .env.example (gitignore)."

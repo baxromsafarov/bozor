@@ -62,6 +62,13 @@ func (f *fakeChat) MarkRead(_ context.Context, convID, readerID string) (int, er
 	return f.markN, f.readErr
 }
 
+func (f *fakeChat) GetMessage(_ context.Context, id string) (domain.Message, error) {
+	if f.msgErr != nil {
+		return domain.Message{}, f.msgErr
+	}
+	return domain.Message{ID: id, ConversationID: "c1", SenderID: "b", Body: "текст", CreatedAt: time.Unix(2, 0).UTC()}, nil
+}
+
 // chatServer собирает роутер и проставляет проброшенные заголовки идентичности.
 func chatServer(h *ConversationHandler, userID string) http.Handler {
 	router := NewRouter(Deps{Log: discardLog(), Conversations: h})
@@ -142,6 +149,20 @@ func TestSend_EmptyBody_422(t *testing.T) {
 	assert.Equal(t, http.StatusUnprocessableEntity, rec.Code)
 }
 
+func TestSend_RateLimited_429(t *testing.T) {
+	fc := &fakeChat{sendErr: app.ErrRateLimited}
+	rec := do(t, chatServer(NewConversationHandler(fc, discardLog()), "buyer1"),
+		http.MethodPost, "/api/v1/conversations/c1/messages", `{"body":"спам"}`)
+	assert.Equal(t, http.StatusTooManyRequests, rec.Code)
+}
+
+func TestSend_Banned_403(t *testing.T) {
+	fc := &fakeChat{sendErr: app.ErrUserBanned}
+	rec := do(t, chatServer(NewConversationHandler(fc, discardLog()), "buyer1"),
+		http.MethodPost, "/api/v1/conversations/c1/messages", `{"body":"привет"}`)
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+}
+
 func TestList_OK(t *testing.T) {
 	fc := &fakeChat{}
 	rec := do(t, chatServer(NewConversationHandler(fc, discardLog()), "b"),
@@ -181,4 +202,20 @@ func TestMessages_NotParticipant_403(t *testing.T) {
 	rec := do(t, chatServer(NewConversationHandler(fc, discardLog()), "stranger"),
 		http.MethodGet, "/api/v1/conversations/c1/messages", "")
 	assert.Equal(t, http.StatusForbidden, rec.Code)
+}
+
+func TestInternalMessage_OK(t *testing.T) {
+	fc := &fakeChat{}
+	router := NewRouter(Deps{Log: discardLog(), Internal: NewInternalHandler(fc, discardLog())})
+	rec := do(t, router, http.MethodGet, "/internal/messages/m1", "")
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.Contains(t, rec.Body.String(), `"sender_id"`)
+	assert.Contains(t, rec.Body.String(), `"текст"`)
+}
+
+func TestInternalMessage_NotFound_404(t *testing.T) {
+	fc := &fakeChat{msgErr: app.ErrMessageNotFound}
+	router := NewRouter(Deps{Log: discardLog(), Internal: NewInternalHandler(fc, discardLog())})
+	rec := do(t, router, http.MethodGet, "/internal/messages/x", "")
+	assert.Equal(t, http.StatusNotFound, rec.Code)
 }

@@ -24,7 +24,7 @@ const (
 const (
 	ActionDismiss  = "dismiss"  // отклонить жалобу (без последствий)
 	ActionWarn     = "warn"     // предупреждение (информационно)
-	ActionTakedown = "takedown" // снять объявление (→ bozor.ad.rejected)
+	ActionTakedown = "takedown" // снять объявление/сообщение (→ bozor.ad.blocked / bozor.chat.message_blocked)
 )
 
 // validTargets / validActions — допустимые значения.
@@ -37,7 +37,7 @@ var (
 var (
 	ErrInvalidTarget  = errors.New("недопустимый тип объекта жалобы")
 	ErrInvalidAction  = errors.New("недопустимое действие модератора")
-	ErrTakedownTarget = errors.New("снятие применимо только к объявлению")
+	ErrTakedownTarget = errors.New("снятие применимо к объявлению или сообщению")
 )
 
 // Report — жалоба на объявление/пользователя/сообщение.
@@ -65,12 +65,13 @@ func ValidateReportInput(targetType, targetID, reason string) error {
 	return ValidateReason(reason)
 }
 
-// ValidateAction проверяет действие модератора; для takedown цель обязана быть объявлением.
+// ValidateAction проверяет действие модератора; takedown применим к объявлению
+// или сообщению (не к пользователю — для пользователя есть бан).
 func ValidateAction(action, targetType string) error {
 	if !validActions[action] {
 		return ErrInvalidAction
 	}
-	if action == ActionTakedown && targetType != TargetAd {
+	if action == ActionTakedown && targetType != TargetAd && targetType != TargetMessage {
 		return ErrTakedownTarget
 	}
 	return nil
