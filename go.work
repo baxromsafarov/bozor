@@ -12,6 +12,7 @@ use (
 	./services/media
 	./services/moderation
 	./services/notification
+	./services/payments
 	./services/search
 	./services/user-profile
 )
