@@ -3,6 +3,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -10,17 +11,26 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
+	"bozor/pkg/shared/events"
 	"bozor/pkg/shared/httpx"
 	"bozor/pkg/shared/logging"
 	"bozor/pkg/shared/migrate"
+	"bozor/pkg/shared/natsx"
 	"bozor/pkg/shared/otelx"
+	"bozor/pkg/shared/outbox"
 	"bozor/pkg/shared/pgxx"
 
 	"bozor/services/payments/internal/app"
 	"bozor/services/payments/internal/config"
+	"bozor/services/payments/internal/domain"
+	"bozor/services/payments/internal/provider"
+	"bozor/services/payments/internal/provider/click"
+	"bozor/services/payments/internal/provider/mock"
+	"bozor/services/payments/internal/provider/payme"
 	"bozor/services/payments/internal/repo"
 	"bozor/services/payments/internal/transport"
 	"bozor/services/payments/migrations"
@@ -79,13 +89,53 @@ func run() error {
 
 	store := repo.NewRepo(pool)
 
+	nc, js, err := natsx.Connect(cfg.NATSURL, serviceName)
+	if err != nil {
+		return fmt.Errorf("подключение к NATS: %w", err)
+	}
+	defer nc.Close()
+	if _, err := natsx.EnsureStream(ctx, js, events.StreamName, []string{events.SubjectsWildcard}); err != nil {
+		return fmt.Errorf("создание стрима: %w", err)
+	}
+
+	// Outbox relay: публикация bozor.payment.succeeded|failed в шину (→ Notification).
+	relay := &outbox.Relay{
+		Pool:    pool,
+		Publish: func(ctx context.Context, env events.Envelope) error { return natsx.Publish(ctx, js, env) },
+		Log:     log,
+	}
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		if err := relay.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
+			log.Error("outbox relay остановлен с ошибкой", slog.String("error", err.Error()))
+		}
+	}()
+	defer wg.Wait()
+
+	// Провайдеры оплаты: mock (dev), Payme (JSON-RPC), Click (Prepare/Complete).
+	mockProv := mock.New()
+	paymeProv := payme.New(cfg.PaymeMerchantID, cfg.PaymeKey, app.NewProviderOps(store, domain.ProviderPayme), log)
+	clickProv := click.New(cfg.ClickServiceID, cfg.ClickMerchantID, cfg.ClickSecretKey, app.NewProviderOps(store, domain.ProviderClick), log)
+	paymentSvc := app.NewPaymentService(store, provider.NewRegistry(mockProv, paymeProv, clickProv), log)
+
 	router := transport.NewRouter(transport.Deps{
 		Log:            log,
 		Catalog:        transport.NewCatalogHandler(app.NewService(store, log), log),
 		Wallet:         transport.NewWalletHandler(app.NewWalletService(store, log), log),
+		Payments:       transport.NewPaymentHandler(paymentSvc, log),
+		PaymeCallback:  paymeProv,
+		ClickCallback:  clickProv,
 		MetricsHandler: metricsHandler,
 		ReadyChecks: map[string]httpx.Check{
 			"postgres": pool.Ping,
+			"nats": func(context.Context) error {
+				if !nc.IsConnected() {
+					return errors.New("nats: нет соединения")
+				}
+				return nil
+			},
 		},
 	})
 

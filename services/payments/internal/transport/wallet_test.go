@@ -18,8 +18,6 @@ import (
 type fakeWallet struct {
 	wallet     domain.Wallet
 	txs        []domain.Transaction
-	topupErr   error
-	gotTopup   int64
 	gotUserID  string
 	balanceErr error
 }
@@ -29,14 +27,6 @@ func (f *fakeWallet) Balance(_ context.Context, userID string) (domain.Wallet, e
 	if f.balanceErr != nil {
 		return domain.Wallet{}, f.balanceErr
 	}
-	return f.wallet, nil
-}
-func (f *fakeWallet) Topup(_ context.Context, _ string, amount int64) (domain.Wallet, error) {
-	f.gotTopup = amount
-	if f.topupErr != nil {
-		return domain.Wallet{}, f.topupErr
-	}
-	f.wallet.BalanceUZS += amount
 	return f.wallet, nil
 }
 func (f *fakeWallet) Transactions(context.Context, string, int) ([]domain.Transaction, error) {
@@ -82,39 +72,6 @@ func TestWallet_Get_OK(t *testing.T) {
 func TestWallet_Get_Anonymous_401(t *testing.T) {
 	rec := do(t, walletServer(&fakeWallet{}, ""), http.MethodGet, "/api/v1/me/wallet", "")
 	assert.Equal(t, http.StatusUnauthorized, rec.Code)
-}
-
-func TestWallet_Topup_OK(t *testing.T) {
-	fw := &fakeWallet{wallet: domain.Wallet{UserID: "u1", BalanceUZS: 1000}}
-	rec := do(t, walletServer(fw, "u1"), http.MethodPost, "/api/v1/wallet/topup", `{"amount_uzs":50000}`)
-	require.Equal(t, http.StatusOK, rec.Code)
-	assert.EqualValues(t, 50000, fw.gotTopup)
-
-	var body walletDTO
-	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
-	assert.EqualValues(t, 51000, body.BalanceUZS)
-}
-
-func TestWallet_Topup_Anonymous_401(t *testing.T) {
-	rec := do(t, walletServer(&fakeWallet{}, ""), http.MethodPost, "/api/v1/wallet/topup", `{"amount_uzs":50000}`)
-	assert.Equal(t, http.StatusUnauthorized, rec.Code)
-}
-
-func TestWallet_Topup_InvalidAmount_422(t *testing.T) {
-	fw := &fakeWallet{topupErr: domain.ErrInvalidAmount}
-	rec := do(t, walletServer(fw, "u1"), http.MethodPost, "/api/v1/wallet/topup", `{"amount_uzs":0}`)
-	assert.Equal(t, http.StatusUnprocessableEntity, rec.Code)
-}
-
-func TestWallet_Topup_OutOfRange_422(t *testing.T) {
-	fw := &fakeWallet{topupErr: domain.ErrTopupOutOfRange}
-	rec := do(t, walletServer(fw, "u1"), http.MethodPost, "/api/v1/wallet/topup", `{"amount_uzs":99999999999}`)
-	assert.Equal(t, http.StatusUnprocessableEntity, rec.Code)
-}
-
-func TestWallet_Topup_BadJSON_422(t *testing.T) {
-	rec := do(t, walletServer(&fakeWallet{}, "u1"), http.MethodPost, "/api/v1/wallet/topup", `{`)
-	assert.Equal(t, http.StatusUnprocessableEntity, rec.Code)
 }
 
 func TestWallet_Transactions_OK(t *testing.T) {

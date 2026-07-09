@@ -11,25 +11,15 @@ import (
 )
 
 type fakeWalletStore struct {
-	wallet    domain.Wallet
-	txs       []domain.Transaction
-	credited  int64
-	debited   int64
-	gotKind   string
-	gotRef    *string
-	debitErr  error
-	creditErr error
+	wallet   domain.Wallet
+	txs      []domain.Transaction
+	debited  int64
+	gotKind  string
+	gotRef   *string
+	debitErr error
 }
 
 func (f *fakeWalletStore) GetWallet(context.Context, string) (domain.Wallet, error) {
-	return f.wallet, nil
-}
-func (f *fakeWalletStore) Credit(_ context.Context, _ string, amount int64, kind string, ref *string) (domain.Wallet, error) {
-	f.credited, f.gotKind, f.gotRef = amount, kind, ref
-	if f.creditErr != nil {
-		return domain.Wallet{}, f.creditErr
-	}
-	f.wallet.BalanceUZS += amount
 	return f.wallet, nil
 }
 func (f *fakeWalletStore) Debit(_ context.Context, _ string, amount int64, kind string, ref *string) (domain.Wallet, error) {
@@ -42,31 +32,6 @@ func (f *fakeWalletStore) Debit(_ context.Context, _ string, amount int64, kind 
 }
 func (f *fakeWalletStore) ListTransactions(context.Context, string, int) ([]domain.Transaction, error) {
 	return f.txs, nil
-}
-
-// TestTopup_ValidatesAndCredits — валидная сумма зачисляется через Credit(kind=topup).
-func TestTopup_ValidatesAndCredits(t *testing.T) {
-	store := &fakeWalletStore{wallet: domain.Wallet{UserID: "u1", BalanceUZS: 1000}}
-	svc := NewWalletService(store, discardLog())
-
-	w, err := svc.Topup(context.Background(), "u1", 50000)
-	require.NoError(t, err)
-	assert.EqualValues(t, 51000, w.BalanceUZS)
-	assert.EqualValues(t, 50000, store.credited)
-	assert.Equal(t, domain.KindTopup, store.gotKind)
-	assert.Nil(t, store.gotRef, "пополнение без reference")
-}
-
-// TestTopup_RejectsBadAmount — сумма вне границ не доходит до стора.
-func TestTopup_RejectsBadAmount(t *testing.T) {
-	store := &fakeWalletStore{}
-	svc := NewWalletService(store, discardLog())
-
-	_, err := svc.Topup(context.Background(), "u1", 0)
-	assert.ErrorIs(t, err, domain.ErrInvalidAmount)
-	_, err = svc.Topup(context.Background(), "u1", domain.TopupMax+1)
-	assert.ErrorIs(t, err, domain.ErrTopupOutOfRange)
-	assert.Zero(t, store.credited, "стор не вызывался при невалидной сумме")
 }
 
 // TestDebit_PassesReferenceAndKind — списание пробрасывает kind и reference.

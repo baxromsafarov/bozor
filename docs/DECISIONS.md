@@ -1402,4 +1402,37 @@ Stage 8.2 (ARCHITECTURE §4.12, ROADMAP 8.2) вводит кошелёк: `walle
 
 ---
 
+## ADR-040: Провайдеры оплаты — абстракция CreateInvoice + провайдер-специфичные колбэки (Payme JSON-RPC, Click Prepare/Complete, Mock), идемпотентность через переход статуса платежа; топап становится двухфазным
+
+**Дата:** 2026-07-10 · **Статус:** принято · **Глава:** 8.3
+
+### Контекст
+
+Stage 8.3 (ARCHITECTURE §4.12, ROADMAP 8.3) вводит провайдеров оплаты: интерфейс `PaymentProvider {CreateInvoice; HandleCallback}`, адаптеры Payme (JSON-RPC merchant API), Click (Prepare/Complete), Mock (dev); колбэки идемпотентны (провайдеры ретраят). Вопросы: (1) как абстрагировать провайдеров при радикально разных протоколах колбэков; (2) как обеспечить идемпотентность и exactly-once зачисление; (3) как топап 8.2 (прямое зачисление) стыкуется с провайдерами; (4) откуда события платежей.
+
+### Решение
+
+**(1) CreateInvoice в интерфейсе, колбэки — отдельными HTTP-обработчиками (выбрано).** Внешняя часть провайдера (`provider.Provider.CreateInvoice`) единообразна — строит checkout-URL. Входящая часть (колбэки) у провайдеров несовместима по протоколу (Payme — JSON-RPC поверх Basic-auth; Click — form-encoded двухфазный с MD5-подписью), поэтому реализована **провайдер-специфичными `http.Handler`** в пакетах `provider/payme` и `provider/click`, зависящими от узкого интерфейса `PaymentOps` (ByID/ByExternal/Bind/Confirm/Cancel), который реализует `app.ProviderOps` (привязан к провайдеру — поиск по external_id в пределах провайдера). Так провайдер-специфика (коды ошибок, форматы, подписи) инкапсулирована, а бизнес-операции над платежами общие.
+
+**(2) Идемпотентность через условный переход статуса (выбрано).** `repo.ConfirmPayment` в одной транзакции: `UPDATE payments SET status='succeeded' WHERE id=$1 AND status='pending' RETURNING …`. Переход случился (RETURNING вернул строку) → `credited=true`, зачисление на кошелёк (`creditTx`, переиспользован из 8.2) + `bozor.payment.succeeded` в outbox **в той же tx**. Повторный колбэк (провайдер ретраит) → UPDATE затронул 0 строк → `credited=false`, без второго зачисления и события. Так зачисление привязано к переходу и **exactly-once**. Частичный `UNIQUE (provider, external_id)` не даёт склеить разные платежи под одной транзакцией провайдера. `SetExternalID` (CreateTransaction/Prepare) идемпотентно связывает id транзакции провайдера с платежом.
+
+**(3) Топап становится двухфазным — эволюция контракта 8.2 (выбрано, отменяет «контракт не изменится» из ADR-039).** `POST /wallet/topup {amount_uzs, provider}` теперь **не зачисляет сразу**, а создаёт платёж (pending) и возвращает `{payment_id, status:pending, checkout_url}` (201). Средства зачисляются после колбэка провайдера. Прямое зачисление 8.2 заменено провайдером **Mock**: `CreateInvoice` возвращает ссылку на внутренний `POST /internal/payments/mock/{id}/confirm`, который в dev имитирует колбэк. Прежний `WalletService.Topup` (прямой Credit) удалён; `Credit` теперь вызывается только из `ConfirmPayment`. `WalletService.Debit` (списание для 8.4) сохранён.
+
+**(4) Первый NATS/outbox в сервисе payments (выбрано).** Подтверждение/провал кладут `bozor.payment.succeeded|failed {payment_id, user_id, amount, currency}` в outbox; relay публикует в шину (как в других сервисах). Notification уже потребляет эти subjects (§4.10, шаблоны «успешная оплата»/«оплата не прошла») — на стороне payments только публикация. Миграция 00004 добавляет таблицы `payments` и `outbox`.
+
+### Детали решения
+
+- Миграция 00004: `payments` (id, user_id, provider CHECK mock|payme|click, purpose CHECK topup, amount_uzs>0, status CHECK pending|succeeded|failed|canceled, external_id, timestamps; UNIQUE (provider, external_id) WHERE external_id IS NOT NULL) + `outbox`.
+- Payme (`provider/payme`): Basic-auth (Paycom:key, constant-time), JSON-RPC методы CheckPerformTransaction (allow/сумма в тийинах ×100/-31001/-31050)/CreateTransaction (Bind, state 1)/PerformTransaction (Confirm, state 2)/CancelTransaction (Cancel, state -1)/CheckTransaction (state из статуса платежа); коды -32504/-31001/-31003/-31008/-31050. checkout-URL — base64 `m=…;ac.payment_id=…;a=<тийины>`.
+- Click (`provider/click`): form-encoded Prepare(action=0)/Complete(action=1), проверка MD5-подписи (Prepare: click_trans_id+service_id+secret+merchant_trans_id+amount+action+sign_time; Complete добавляет merchant_prepare_id); коды 0/-1/-2/-4/-5/-6/-9. checkout-URL — my.click.uz с transaction_param=payment_id.
+- Mock (`provider/mock`): checkout на внутренний confirm-эндпоинт; `app.ConfirmMock` подтверждает только mock-платежи.
+- app.PaymentService: InitTopup (валидация суммы/провайдера → CreatePayment → CreateInvoice), GetPayment, ConfirmMock, ProviderOps. transport: PaymentHandler.Topup (201 checkout) / MockConfirm; колбэки провайдеров смонтированы под `/internal/payments/{payme,click}` и `/internal/payments/mock/{id}/confirm` (внутренняя сеть, без пользовательской авторизации — провайдеры аутентифицируются подписью/Basic-auth). main: NATS + outbox relay + реестр провайдеров + ready-check nats. Конфиг/compose/.env: реквизиты PAYME_*/CLICK_* (dev-заглушки).
+
+### Последствия
+
+- Кошелёк пополняется через реальные протоколы Payme/Click и Mock для dev; события платежей доходят до Notification. Проверено вживую (payments пересобран healthy, миграция 00004 applied=1, первый NATS в сервисе): (1) Mock — топап (pending+checkout+confirm_endpoint), баланс до 0, confirm → succeeded + баланс 50000 + проводка topup/credit с reference=payment_id, повторный confirm → баланс не удвоился; (2) Payme — топап (paycom base64 checkout), CheckPerformTransaction→allow, CreateTransaction→state 1, PerformTransaction→state 2 + баланс 50000, неверный ключ→-32504; (3) Click — топап, Prepare(valid sign)→error 0, Complete(valid sign)→error 0 + баланс 50000, неверная подпись→-1; все 3 `bozor.payment.succeeded` опубликованы (relayed) и приняты Notification (3 уведомления, dev-статус skipped); инвариант леджера сходится по всем кошелькам (balance=Σcredit−Σdebit); `/metrics` 200. Unit (domain; app: InitTopup/ConfirmMock/ProviderOps; payme: auth/5 методов/идемпотентность; click: sign/prepare/complete/amount; mock) + integration на testcontainers (ConfirmPayment зачисляет один раз+событие+повтор без двойного зачисления, FailPayment+событие, SetExternalID+поиск, not-found) — go test PASS (unit + integration 38.7s); golangci-lint 0 issues (default+integration, md5 в Click под //nolint:gosec — алгоритм задан протоколом); gofmt чисто.
+- **Условия пересмотра:** применение услуг к объявлению (8.4 — `POST /ads/{id}/promote`, saga Debit→активация→компенсация, `bozor.promotion.activated`); полное состояние транзакций Payme (create_time/perform_time/cancel_time сейчас выводятся из статуса и timestamps платежа — при строгой сертификации Payme добавить отдельные колонки); реальные merchant-реквизиты и вебхуки в prod (сейчас dev-заглушки); проверка суммы Click в тийинах при дробных суммах; ограничение доступа к `/internal/payments/*` на уровне сети/nginx (провайдерские IP allowlist).
+
+---
+
 *Конец журнала. Новые решения добавляются в конец с очередным номером ADR.*

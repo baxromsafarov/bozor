@@ -2,7 +2,6 @@ package transport
 
 import (
 	"context"
-	"errors"
 	"log/slog"
 	"net/http"
 	"strconv"
@@ -15,9 +14,6 @@ import (
 	"bozor/services/payments/internal/domain"
 )
 
-// maxTopupBody — предел тела запроса пополнения.
-const maxTopupBody = 4 << 10
-
 // transactions clamp по умолчанию/максимум для истории кошелька.
 const (
 	defaultTxLimit = 20
@@ -27,7 +23,6 @@ const (
 // Wallet — use-cases кошелька (реализуется app.WalletService).
 type Wallet interface {
 	Balance(ctx context.Context, userID string) (domain.Wallet, error)
-	Topup(ctx context.Context, userID string, amount int64) (domain.Wallet, error)
 	Transactions(ctx context.Context, userID string, limit int) ([]domain.Transaction, error)
 }
 
@@ -61,10 +56,6 @@ type transactionDTO struct {
 	CreatedAt    time.Time `json:"created_at"`
 }
 
-type topupRequest struct {
-	AmountUZS int64 `json:"amount_uzs"`
-}
-
 // Get отдаёт кошелёк текущего пользователя с последними проводками.
 func (h *WalletHandler) Get(w http.ResponseWriter, r *http.Request) {
 	userID := authx.UserID(r.Context())
@@ -87,25 +78,6 @@ func (h *WalletHandler) Get(w http.ResponseWriter, r *http.Request) {
 	httpx.Respond(w, http.StatusOK, toWalletDTO(wallet, recent))
 }
 
-// Topup пополняет кошелёк текущего пользователя.
-func (h *WalletHandler) Topup(w http.ResponseWriter, r *http.Request) {
-	userID := authx.UserID(r.Context())
-
-	var req topupRequest
-	if err := httpx.DecodeJSON(w, r, &req, maxTopupBody); err != nil {
-		httpx.WriteProblem(w, r, err)
-		return
-	}
-
-	wallet, err := h.svc.Topup(r.Context(), userID, req.AmountUZS)
-	if err != nil {
-		writeWalletError(w, r, h.log, err)
-		return
-	}
-
-	httpx.Respond(w, http.StatusOK, toWalletDTO(wallet, nil))
-}
-
 // Transactions отдаёт историю кошелька (свежие сверху) с пагинацией по limit.
 func (h *WalletHandler) Transactions(w http.ResponseWriter, r *http.Request) {
 	userID := authx.UserID(r.Context())
@@ -124,25 +96,6 @@ func (h *WalletHandler) Transactions(w http.ResponseWriter, r *http.Request) {
 		out[i] = toTransactionDTO(t)
 	}
 	httpx.Respond(w, http.StatusOK, map[string]any{"transactions": out})
-}
-
-// writeWalletError переводит доменные ошибки кошелька в RFC 7807.
-func writeWalletError(w http.ResponseWriter, r *http.Request, log *slog.Logger, err error) {
-	switch {
-	case errors.Is(err, domain.ErrInvalidAmount):
-		httpx.WriteProblem(w, r, apperr.New(apperr.KindInvalid, "invalid_amount",
-			"Некорректная сумма", "Noto'g'ri summa"))
-	case errors.Is(err, domain.ErrTopupOutOfRange):
-		httpx.WriteProblem(w, r, apperr.New(apperr.KindInvalid, "amount_out_of_range",
-			"Сумма пополнения вне допустимых границ", "To'ldirish summasi ruxsat etilgan chegaradan tashqarida"))
-	case errors.Is(err, domain.ErrInsufficientFunds):
-		httpx.WriteProblem(w, r, apperr.New(apperr.KindConflict, "insufficient_funds",
-			"Недостаточно средств", "Mablag' yetarli emas"))
-	default:
-		log.ErrorContext(r.Context(), "операция с кошельком", slog.String("error", err.Error()))
-		httpx.WriteProblem(w, r, apperr.New(apperr.KindInternal, "wallet_op_failed",
-			"Не удалось выполнить операцию", "Amalni bajarib bo'lmadi"))
-	}
 }
 
 func toWalletDTO(w domain.Wallet, recent []domain.Transaction) walletDTO {

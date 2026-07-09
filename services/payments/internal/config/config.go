@@ -24,6 +24,16 @@ type Config struct {
 	AppDSN string
 	// MigrateDSN — прямое подключение к PostgreSQL для миграций (ADR-013).
 	MigrateDSN string
+
+	// NATSURL — адрес NATS JetStream (публикация bozor.payment.succeeded|failed).
+	NATSURL string
+
+	// Реквизиты провайдеров оплаты (для проверки колбэков и ссылок оплаты).
+	PaymeMerchantID string
+	PaymeKey        string
+	ClickServiceID  string
+	ClickMerchantID string
+	ClickSecretKey  string
 }
 
 // Load читает конфигурацию из окружения (fail-fast на обязательных ключах).
@@ -45,6 +55,12 @@ func Load() (*Config, error) {
 		MigrateDSN: dsn(user, pass,
 			config.String("POSTGRES_HOST", "postgres"),
 			config.String("POSTGRES_PORT", "5432")),
+		NATSURL:         config.String("NATS_URL", "nats://nats:4222"),
+		PaymeMerchantID: config.String("PAYME_MERCHANT_ID", "payme-merchant-dev"),
+		PaymeKey:        config.String("PAYME_KEY", "payme-key-dev"),
+		ClickServiceID:  config.String("CLICK_SERVICE_ID", "click-service-dev"),
+		ClickMerchantID: config.String("CLICK_MERCHANT_ID", "click-merchant-dev"),
+		ClickSecretKey:  config.String("CLICK_SECRET_KEY", "click-secret-dev"),
 	}, nil
 }
 

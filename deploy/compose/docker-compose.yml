@@ -679,11 +679,19 @@ services:
       POSTGRES_PORT: ${POSTGRES_PORT}
       PGBOUNCER_HOST: ${PGBOUNCER_HOST}
       PGBOUNCER_PORT: ${PGBOUNCER_PORT}
+      NATS_URL: ${NATS_URL}                      # publish bozor.payment.succeeded|failed → Notification
+      PAYME_MERCHANT_ID: ${PAYME_MERCHANT_ID}    # реквизиты провайдеров оплаты (проверка колбэков/ссылки)
+      PAYME_KEY: ${PAYME_KEY}
+      CLICK_SERVICE_ID: ${CLICK_SERVICE_ID}
+      CLICK_MERCHANT_ID: ${CLICK_MERCHANT_ID}
+      CLICK_SECRET_KEY: ${CLICK_SECRET_KEY}
       OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT}
     depends_on:
       postgres:
         condition: service_healthy
       pgbouncer:
+        condition: service_healthy
+      nats:                  # publish bozor.payment.succeeded|failed
         condition: service_healthy
       tempo:
         condition: service_started

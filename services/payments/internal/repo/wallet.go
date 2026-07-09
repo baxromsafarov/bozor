@@ -36,27 +36,39 @@ func (r *Repo) Credit(ctx context.Context, userID string, amount int64, kind str
 	if amount <= 0 {
 		return domain.Wallet{}, domain.ErrInvalidAmount
 	}
-	w := domain.Wallet{UserID: userID}
+	var w domain.Wallet
 	err := pgxx.WithTx(ctx, r.pool, func(tx pgx.Tx) error {
-		if err := tx.QueryRow(ctx, `
-			INSERT INTO wallets (user_id, balance_uzs, version)
-			VALUES ($1, $2, 1)
-			ON CONFLICT (user_id) DO UPDATE
-			  SET balance_uzs = wallets.balance_uzs + EXCLUDED.balance_uzs,
-			      version     = wallets.version + 1,
-			      updated_at  = now()
-			RETURNING balance_uzs, version`, userID, amount).
-			Scan(&w.BalanceUZS, &w.Version); err != nil {
-			return fmt.Errorf("апсерт кошелька: %w", err)
-		}
-		// Двойная запись: +amount на счёт пользователя, −amount с источника средств.
-		return insertPostings(ctx, tx, uuid.New().String(), kind, reference, posting{
-			account: domain.AccountUserWallet, walletUser: &userID, direction: domain.DirectionCredit, amount: amount,
-		}, posting{
-			account: domain.AccountExternalTopup, walletUser: nil, direction: domain.DirectionDebit, amount: amount,
-		})
+		var errTx error
+		w, errTx = creditTx(ctx, tx, userID, amount, kind, reference)
+		return errTx
 	})
 	if err != nil {
+		return domain.Wallet{}, err
+	}
+	return w, nil
+}
+
+// creditTx выполняет зачисление внутри переданной транзакции (переиспользуется
+// прямым пополнением и подтверждением платежа провайдером — ConfirmPayment).
+func creditTx(ctx context.Context, tx pgx.Tx, userID string, amount int64, kind string, reference *string) (domain.Wallet, error) {
+	w := domain.Wallet{UserID: userID}
+	if err := tx.QueryRow(ctx, `
+		INSERT INTO wallets (user_id, balance_uzs, version)
+		VALUES ($1, $2, 1)
+		ON CONFLICT (user_id) DO UPDATE
+		  SET balance_uzs = wallets.balance_uzs + EXCLUDED.balance_uzs,
+		      version     = wallets.version + 1,
+		      updated_at  = now()
+		RETURNING balance_uzs, version`, userID, amount).
+		Scan(&w.BalanceUZS, &w.Version); err != nil {
+		return domain.Wallet{}, fmt.Errorf("апсерт кошелька: %w", err)
+	}
+	// Двойная запись: +amount на счёт пользователя, −amount с источника средств.
+	if err := insertPostings(ctx, tx, uuid.New().String(), kind, reference, posting{
+		account: domain.AccountUserWallet, walletUser: &userID, direction: domain.DirectionCredit, amount: amount,
+	}, posting{
+		account: domain.AccountExternalTopup, walletUser: nil, direction: domain.DirectionDebit, amount: amount,
+	}); err != nil {
 		return domain.Wallet{}, err
 	}
 	return w, nil

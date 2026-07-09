@@ -7,10 +7,11 @@ import (
 	"bozor/services/payments/internal/domain"
 )
 
-// WalletStore — доступ к кошельку и леджеру (реализуется repo).
+// WalletStore — доступ к кошельку и леджеру (реализуется repo). Зачисление
+// (Credit) выполняется при подтверждении платежа провайдером внутри repo
+// (ConfirmPayment) — здесь только чтение и списание.
 type WalletStore interface {
 	GetWallet(ctx context.Context, userID string) (domain.Wallet, error)
-	Credit(ctx context.Context, userID string, amount int64, kind string, reference *string) (domain.Wallet, error)
 	Debit(ctx context.Context, userID string, amount int64, kind string, reference *string) (domain.Wallet, error)
 	ListTransactions(ctx context.Context, userID string, limit int) ([]domain.Transaction, error)
 }
@@ -29,16 +30,6 @@ func NewWalletService(store WalletStore, log *slog.Logger) *WalletService {
 // Balance возвращает текущий кошелёк пользователя (нулевой, если ещё не создан).
 func (s *WalletService) Balance(ctx context.Context, userID string) (domain.Wallet, error) {
 	return s.store.GetWallet(ctx, userID)
-}
-
-// Topup пополняет кошелёк на amount (UZS). В Stage 8.2 — прямое зачисление
-// (dev/mock); в 8.3 тот же путь вызовет колбэк провайдера оплаты после
-// подтверждения платежа. Возвращает обновлённый кошелёк.
-func (s *WalletService) Topup(ctx context.Context, userID string, amount int64) (domain.Wallet, error) {
-	if err := domain.ValidateTopup(amount); err != nil {
-		return domain.Wallet{}, err
-	}
-	return s.store.Credit(ctx, userID, amount, domain.KindTopup, nil)
 }
 
 // Debit списывает amount с кошелька при покупке услуги (используется сагой 8.4).

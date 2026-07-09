@@ -16,11 +16,19 @@ import (
 
 const serviceName = "payments-promotions"
 
+// ProviderCallback — HTTP-обработчик колбэка провайдера (payme/click).
+type ProviderCallback interface {
+	ServeHTTP(w http.ResponseWriter, r *http.Request)
+}
+
 // Deps — зависимости для сборки роутера сервиса.
 type Deps struct {
 	Log            *slog.Logger
 	Catalog        *CatalogHandler
 	Wallet         *WalletHandler
+	Payments       *PaymentHandler
+	PaymeCallback  ProviderCallback
+	ClickCallback  ProviderCallback
 	ReadyChecks    map[string]httpx.Check
 	MetricsHandler http.Handler
 }
@@ -46,15 +54,29 @@ func NewRouter(d Deps) http.Handler {
 		r.Get("/api/v1/promotions/catalog", d.Catalog.Get)
 	}
 
-	// Кошелёк — только аутентифицированный пользователь (свой баланс/история).
-	if d.Wallet != nil {
-		r.Group(func(api chi.Router) {
-			api.Use(authx.FromForwardedHeaders)
-			api.Use(requireAuth)
+	// Кошелёк и инициация пополнения — аутентифицированный пользователь.
+	r.Group(func(api chi.Router) {
+		api.Use(authx.FromForwardedHeaders)
+		api.Use(requireAuth)
+		if d.Wallet != nil {
 			api.Get("/api/v1/me/wallet", d.Wallet.Get)
 			api.Get("/api/v1/me/wallet/transactions", d.Wallet.Transactions)
-			api.Post("/api/v1/wallet/topup", d.Wallet.Topup)
-		})
+		}
+		if d.Payments != nil {
+			api.Post("/api/v1/wallet/topup", d.Payments.Topup)
+		}
+	})
+
+	// Колбэки провайдеров и dev-подтверждение mock — только внутренняя сеть (без
+	// пользовательской авторизации; провайдеры аутентифицируются подписью/Basic-auth).
+	if d.Payments != nil {
+		r.Post("/internal/payments/mock/{id}/confirm", d.Payments.MockConfirm)
+	}
+	if d.PaymeCallback != nil {
+		r.Post("/internal/payments/payme", d.PaymeCallback.ServeHTTP)
+	}
+	if d.ClickCallback != nil {
+		r.Post("/internal/payments/click", d.ClickCallback.ServeHTTP)
 	}
 
 	notFound := func(w http.ResponseWriter, req *http.Request) {
