@@ -20,10 +20,11 @@ const svcFavorites = "favorites-savedsearch"
 var Routes = []Route{
 	{Prefix: "/api/v1/auth", Service: "auth"},
 	{Prefix: "/api/v1/users", Service: "user-profile"},
-	// Мои объявления/избранное/сохранённые поиски — более специфичны, чем /me.
+	// Мои объявления/избранное/сохранённые поиски/кошелёк — более специфичны, чем /me.
 	{Prefix: "/api/v1/me/ads", Service: "listing-ads"},
 	{Prefix: "/api/v1/me/favorites", Service: svcFavorites},
 	{Prefix: "/api/v1/me/saved-searches", Service: svcFavorites},
+	{Prefix: "/api/v1/me/wallet", Service: "payments-promotions"},
 	{Prefix: "/api/v1/me", Service: "user-profile"},
 	{Prefix: "/api/v1/categories", Service: "catalog"},
 	{Prefix: "/api/v1/attributes", Service: "catalog"},
@@ -43,5 +44,6 @@ var Routes = []Route{
 	{Prefix: "/api/v1/moderation", Service: "moderation"},
 	{Prefix: "/api/v1/payments", Service: "payments-promotions"},
 	{Prefix: "/api/v1/promotions", Service: "payments-promotions"},
+	{Prefix: "/api/v1/wallet", Service: "payments-promotions"},
 	{Prefix: "/api/v1/reviews", Service: "reviews"},
 }

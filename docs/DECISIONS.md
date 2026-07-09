@@ -1373,4 +1373,33 @@ CHAPTER 8 (ARCHITECTURE §4.12, ROADMAP 8.1) открывает монетиза
 
 ---
 
+## ADR-039: Кошелёк — леджер в стиле двойной записи (парные проводки, append-only), баланс как денормализованный кеш, ленивое создание, прямое пополнение до провайдеров
+
+**Дата:** 2026-07-10 · **Статус:** принято · **Глава:** 8.2
+
+### Контекст
+
+Stage 8.2 (ARCHITECTURE §4.12, ROADMAP 8.2) вводит кошелёк: `wallets`, `wallet_transactions` (леджер в стиле двойной записи), пополнение и списание при покупке, `GET /me/wallet`, `POST /wallet/topup`. Вопросы: (1) как смоделировать леджер двойной записи и связь с балансом; (2) как обеспечить корректность конкурентных списаний; (3) откуда берутся средства при пополнении, если провайдеры оплаты — только в 8.3.
+
+### Решение
+
+**(1) Леджер парных проводок + баланс как кеш (выбрано).** `wallet_transactions` — append-only: каждая операция (`operation_id`) пишет **пару** проводок дебет/кредит с равными суммами (сумма проводок операции = 0). Проводка счёта пользователя несёт `wallet_user_id` (`account='user_wallet'`), парная системная — с NULL (`external_topup` при пополнении, `promotion_revenue` при покупке, `refund_source` при возврате 8.7). `wallets.balance_uzs` — денормализованный кеш для быстрого чтения; **источник истины — леджер**: баланс всегда сходится с `Σ(credit) − Σ(debit)` по проводкам пользователя (проверяемый инвариант). История неизменяемая (строки не обновляются/не удаляются).
+
+**(2) Пессимистичная блокировка строки при списании (выбрано).** `Debit` в одной транзакции: `SELECT ... FOR UPDATE` строки кошелька → проверка достаточности → `UPDATE balance -= amount, version+1` → пара проводок. Блокировка строки исключает двойное списание при гонке; недостаточно средств (или нет кошелька) → `ErrInsufficientFunds`, без мутаций. `version` растёт на каждую мутацию (оптимистичная конкуренция для внешних потребителей и саги 8.4). `Credit` — апсерт (`ON CONFLICT DO UPDATE balance += amount`) + пара проводок в одной tx; кошелёк создаётся при первом пополнении (`GET /me/wallet` до этого отдаёт нулевой кошелёк, не создавая строку).
+
+**(3) Прямое пополнение в 8.2, провайдер оборачивает в 8.3 (выбрано).** `POST /wallet/topup` в 8.2 — прямое зачисление (dev/mock, `Credit(kind=topup)`), сумма валидируется (`[TopupMin=1000, TopupMax=50 000 000]` UZS → 422). В 8.3 тот же путь `Credit` вызовется из колбэка провайдера (Payme/Click) после подтверждения платежа — топап станет двухфазным (invoice → callback → credit), REST-контракт не изменится. Списание (`Debit`) реализовано в app/repo (для саги покупки 8.4), но HTTP-эндпоинта покупки в 8.2 нет — покрыто unit/integration.
+
+### Детали решения
+
+- Миграция 00003: `wallets` (user_id PK, balance_uzs≥0, version, timestamps), `wallet_transactions` (id, operation_id, kind CHECK topup|purchase|refund, account, wallet_user_id, direction CHECK debit|credit, amount_uzs>0, reference, created_at; индексы: история пользователя `(wallet_user_id, created_at DESC) WHERE wallet_user_id IS NOT NULL`, парные проводки `(operation_id)`).
+- domain: Wallet/Transaction, константы видов/направлений/счетов, `ValidateTopup`, `Transaction.SignedAmount` (credit +, debit −), ошибки ErrInvalidAmount/ErrTopupOutOfRange/ErrInsufficientFunds. repo: GetWallet (нет строки → нулевой кошелёк), Credit/Debit (парные проводки в одной tx через pgxx.WithTx, `insertPostings`), ListTransactions (только проводки пользователя, свежие сверху). app.WalletService: Balance/Topup/Debit/Transactions. transport: `GET /api/v1/me/wallet` (+ recent), `GET /api/v1/me/wallet/transactions`, `POST /api/v1/wallet/topup` — под requireAuth (аноним→401); insufficient_funds→409, invalid_amount/amount_out_of_range→422.
+- gateway: маршруты `/api/v1/me/wallet`→payments-promotions (специфичнее `/api/v1/me`→user-profile) и `/api/v1/wallet`→payments-promotions. Сервис пока без NATS (события `bozor.payment.*` — с провайдерами 8.3).
+
+### Последствия
+
+- Есть кошелёк с корректным леджером — основа для покупки услуг (8.4) и возвратов (8.7). Проверено вживую (payments+gateway пересобраны healthy, миграция 00003 applied=1): `GET /me/wallet` нового пользователя → баланс 0; `POST /wallet/topup` 50000 → баланс 50000/version 1; повторный топап 30000 → история 2 записи (свежая сверху, topup/credit); валидация 0/<min/>max → 422; аноним → 401; **инвариант леджера в БД: balance=80000 == Σcredit−Σdebit=80000, 4 проводки в 2 операциях, каждая операция сбалансирована (credit=debit)**; маршрутизация через gateway с минтованным JWT: `GET /api/v1/me/wallet` вернул кошелёк payments (не user-profile), `POST /wallet/topup` через gateway зачислил, контрольный `/api/v1/me` по-прежнему идёт в user-profile (200); `/metrics` 200. Unit (domain: ValidateTopup границы, SignedAmount; app: Topup валидация+Credit, Debit проброс kind/reference/insufficient, Balance; transport: get/topup 200, 401 аноним, 422 невалид/вне границ/битый JSON, transactions) + integration на testcontainers (Credit создаёт кошелёк+пару проводок+операция сбалансирована, накопление+рост version, Debit уменьшает+инвариант леджера+reference на проводках, insufficient на пустом/недостаточном без мутаций, GetWallet нулевой, история свежие сверху) — go test PASS (unit + integration 27.8s); golangci-lint 0 issues (default+integration); gofmt чисто.
+- **Условия пересмотра:** пополнение через провайдеров Payme/Click (8.3 — двухфазный invoice→callback→Credit, идемпотентные колбэки, таблица `payments`, события `bozor.payment.succeeded|failed`); списание при покупке услуги/набора (8.4 — `POST /ads/{id}/promote`, saga списание→активация→компенсация); возвраты (8.7 — `refund` пропорционально неиспользованным дням, `bozor.wallet.refunded`); периодическая сверка баланса с леджером (reconciliation-джоб) и мультивалютность — на будущее (сейчас только UZS).
+
+---
+
 *Конец журнала. Новые решения добавляются в конец с очередным номером ADR.*

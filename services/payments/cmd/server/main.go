@@ -82,6 +82,7 @@ func run() error {
 	router := transport.NewRouter(transport.Deps{
 		Log:            log,
 		Catalog:        transport.NewCatalogHandler(app.NewService(store, log), log),
+		Wallet:         transport.NewWalletHandler(app.NewWalletService(store, log), log),
 		MetricsHandler: metricsHandler,
 		ReadyChecks: map[string]httpx.Check{
 			"postgres": pool.Ping,
