@@ -6,6 +6,10 @@ type Route struct {
 	Service string // имя внутреннего сервиса (совпадает с DNS в сети compose)
 }
 
+// svcFavorites — сервис избранного и сохранённых поисков (обслуживает несколько
+// префиксов, поэтому вынесен в константу).
+const svcFavorites = "favorites-savedsearch"
+
 // Routes — таблица маршрутизации внешнего API `/api/v1/*` на внутренние
 // сервисы. Полный путь (с префиксом /api/v1) проксируется как есть —
 // версионирование обрабатывают сами сервисы.
@@ -16,9 +20,10 @@ type Route struct {
 var Routes = []Route{
 	{Prefix: "/api/v1/auth", Service: "auth"},
 	{Prefix: "/api/v1/users", Service: "user-profile"},
-	// Мои объявления/избранное — более специфичны, чем /me → user-profile.
+	// Мои объявления/избранное/сохранённые поиски — более специфичны, чем /me.
 	{Prefix: "/api/v1/me/ads", Service: "listing-ads"},
-	{Prefix: "/api/v1/me/favorites", Service: "favorites-savedsearch"},
+	{Prefix: "/api/v1/me/favorites", Service: svcFavorites},
+	{Prefix: "/api/v1/me/saved-searches", Service: svcFavorites},
 	{Prefix: "/api/v1/me", Service: "user-profile"},
 	{Prefix: "/api/v1/categories", Service: "catalog"},
 	{Prefix: "/api/v1/attributes", Service: "catalog"},
@@ -29,8 +34,8 @@ var Routes = []Route{
 	{Prefix: "/api/v1/ads/search", Service: "search"},
 	{Prefix: "/api/v1/ads", Service: "listing-ads"},
 	{Prefix: "/api/v1/media", Service: "media"},
-	{Prefix: "/api/v1/favorites", Service: "favorites-savedsearch"},
-	{Prefix: "/api/v1/saved-searches", Service: "favorites-savedsearch"},
+	{Prefix: "/api/v1/favorites", Service: svcFavorites},
+	{Prefix: "/api/v1/saved-searches", Service: svcFavorites},
 	{Prefix: "/api/v1/chat", Service: "chat"},
 	{Prefix: "/api/v1/notifications", Service: "notification"},
 	{Prefix: "/api/v1/moderation", Service: "moderation"},

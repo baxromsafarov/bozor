@@ -533,14 +533,16 @@ services:
       POSTGRES_PORT: ${POSTGRES_PORT}
       PGBOUNCER_HOST: ${PGBOUNCER_HOST}
       PGBOUNCER_PORT: ${PGBOUNCER_PORT}
-      NATS_URL: ${NATS_URL}                     # потребление bozor.ad.deleted (очистка избранного)
+      NATS_URL: ${NATS_URL}                     # bozor.ad.deleted (очистка), bozor.ad.approved (matcher)
+      LISTING_INTERNAL_URL: http://listing-ads:8080  # matcher читает объявление для оценки фильтров
+      SAVED_SEARCH_NOTIFY_THROTTLE: ${SAVED_SEARCH_NOTIFY_THROTTLE}  # окно троттлинга уведомлений
       OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT}
     depends_on:
       postgres:
         condition: service_healthy
       pgbouncer:
         condition: service_healthy
-      nats:                  # consume bozor.ad.deleted
+      nats:                  # consume bozor.ad.deleted / bozor.ad.approved
         condition: service_healthy
       tempo:
         condition: service_started

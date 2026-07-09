@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/url"
 	"strings"
+	"time"
 
 	"bozor/pkg/shared/config"
 )
@@ -13,6 +14,10 @@ import (
 const dbName = "bozor_favorites"
 
 const defaultAddr = ":8080"
+
+// defaultNotifyThrottle — окно троттлинга уведомлений на один сохранённый поиск
+// (защита от лавины при массовом одобрении объявлений).
+const defaultNotifyThrottle = time.Minute
 
 // Config — конфигурация Favorites/SavedSearch-сервиса.
 type Config struct {
@@ -25,9 +30,14 @@ type Config struct {
 	// MigrateDSN — прямое подключение к PostgreSQL для миграций (ADR-013).
 	MigrateDSN string
 
-	// NATSURL — адрес NATS JetStream (потребление bozor.ad.deleted для очистки
-	// избранного; матчинг сохранённых поисков — Stage 5.3).
+	// NATSURL — адрес NATS JetStream (потребление bozor.ad.deleted — очистка
+	// избранного; bozor.ad.approved — matcher сохранённых поисков).
 	NATSURL string
+	// ListingInternalURL — базовый URL внутреннего read-эндпоинта Listing
+	// (matcher читает объявление для оценки фильтров).
+	ListingInternalURL string
+	// NotifyThrottle — окно троттлинга уведомлений на сохранённый поиск.
+	NotifyThrottle time.Duration
 }
 
 // Load читает конфигурацию из окружения (fail-fast на обязательных ключах).
@@ -49,7 +59,9 @@ func Load() (*Config, error) {
 		MigrateDSN: dsn(user, pass,
 			config.String("POSTGRES_HOST", "postgres"),
 			config.String("POSTGRES_PORT", "5432")),
-		NATSURL: config.String("NATS_URL", "nats://nats:4222"),
+		NATSURL:            config.String("NATS_URL", "nats://nats:4222"),
+		ListingInternalURL: config.String("LISTING_INTERNAL_URL", "http://listing-ads:8080"),
+		NotifyThrottle:     config.Duration("SAVED_SEARCH_NOTIFY_THROTTLE", defaultNotifyThrottle),
 	}, nil
 }
 

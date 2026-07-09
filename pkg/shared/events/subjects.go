@@ -24,6 +24,9 @@ const (
 	SubjectUserUpdated = "bozor.user.updated"
 	SubjectUserBanned  = "bozor.user.banned"
 
+	// Сохранённые поиски.
+	SubjectSavedSearchMatched = "bozor.saved_search.matched" // новое объявление совпало с сохранённым поиском (→ Notification)
+
 	// Категории каталога.
 	SubjectCategoryCreated = "bozor.category.created"
 	SubjectCategoryUpdated = "bozor.category.updated"

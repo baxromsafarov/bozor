@@ -18,6 +18,7 @@ const serviceName = "favorites-savedsearch"
 type Deps struct {
 	Log            *slog.Logger
 	Handler        *Handler
+	SavedSearch    *SavedSearchHandler
 	ReadyChecks    map[string]httpx.Check
 	MetricsHandler http.Handler
 }
@@ -45,6 +46,13 @@ func NewRouter(d Deps) http.Handler {
 		api.Post("/api/v1/favorites/{adId}", d.Handler.Add)
 		api.Delete("/api/v1/favorites/{adId}", d.Handler.Remove)
 		api.Get("/api/v1/me/favorites", d.Handler.List)
+
+		// Сохранённые поиски — только владелец.
+		if d.SavedSearch != nil {
+			api.Post("/api/v1/saved-searches", d.SavedSearch.Create)
+			api.Get("/api/v1/me/saved-searches", d.SavedSearch.List)
+			api.Delete("/api/v1/saved-searches/{id}", d.SavedSearch.Delete)
+		}
 	})
 
 	notFound := func(w http.ResponseWriter, req *http.Request) {

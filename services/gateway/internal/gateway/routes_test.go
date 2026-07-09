@@ -120,6 +120,8 @@ func TestRoutes_MeFavoritesPrecedence(t *testing.T) {
 		{"/api/v1/me", 1, 0},
 		{"/api/v1/me/favorites", 0, 1},
 		{"/api/v1/favorites/42", 0, 1},
+		{"/api/v1/me/saved-searches", 0, 1},
+		{"/api/v1/saved-searches", 0, 1},
 	}
 	for _, tc := range cases {
 		t.Run(tc.path, func(t *testing.T) {

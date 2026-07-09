@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
@@ -20,10 +21,13 @@ import (
 	"bozor/pkg/shared/migrate"
 	"bozor/pkg/shared/natsx"
 	"bozor/pkg/shared/otelx"
+	"bozor/pkg/shared/outbox"
 	"bozor/pkg/shared/pgxx"
 
 	"bozor/services/favorites-savedsearch/internal/app"
 	"bozor/services/favorites-savedsearch/internal/config"
+	"bozor/services/favorites-savedsearch/internal/listingclient"
+	"bozor/services/favorites-savedsearch/internal/matcher"
 	"bozor/services/favorites-savedsearch/internal/repo"
 	"bozor/services/favorites-savedsearch/internal/transport"
 	"bozor/services/favorites-savedsearch/internal/worker"
@@ -31,6 +35,9 @@ import (
 )
 
 const serviceName = "favorites-savedsearch"
+
+// listingTimeout — таймаут чтения объявления из Listing (matcher).
+const listingTimeout = 5 * time.Second
 
 func main() {
 	healthcheck := flag.Bool("health", false, "выполнить self health-check по /healthz и выйти")
@@ -83,7 +90,7 @@ func run() error {
 
 	favRepo := repo.NewRepo(pool)
 
-	// NATS JetStream: консьюмер bozor.ad.deleted для очистки избранного.
+	// NATS JetStream: консьюмеры + relay событий bozor.saved_search.matched.
 	nc, js, err := natsx.Connect(cfg.NATSURL, serviceName)
 	if err != nil {
 		return fmt.Errorf("подключение к NATS: %w", err)
@@ -93,20 +100,49 @@ func run() error {
 		return fmt.Errorf("создание стрима: %w", err)
 	}
 
+	// Outbox relay: публикация совпадений сохранённых поисков в шину.
+	relay := &outbox.Relay{
+		Pool:    pool,
+		Publish: func(ctx context.Context, env events.Envelope) error { return natsx.Publish(ctx, js, env) },
+		Log:     log,
+	}
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		if err := relay.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
+			log.Error("outbox relay остановлен с ошибкой", slog.String("error", err.Error()))
+		}
+	}()
+	defer wg.Wait()
+
+	// Консьюмер bozor.ad.deleted: очистка избранного.
 	adDeleted := worker.NewAdDeleted(favRepo, log)
-	cc, err := natsx.Consume(ctx, js, events.StreamName, worker.AdDeletedConsumer,
+	ccDel, err := natsx.Consume(ctx, js, events.StreamName, worker.AdDeletedConsumer,
 		[]string{events.SubjectAdDeleted}, 3, adDeleted.Handle)
 	if err != nil {
 		return fmt.Errorf("консьюмер bozor.ad.deleted: %w", err)
 	}
-	defer cc.Stop()
+	defer ccDel.Stop()
+
+	// Консьюмер bozor.ad.approved: matcher сохранённых поисков (Stage 5.3).
+	listing := listingclient.New(cfg.ListingInternalURL, listingTimeout)
+	mtch := matcher.New(listing, favRepo, cfg.NotifyThrottle, log)
+	ccMatch, err := natsx.Consume(ctx, js, events.StreamName, matcher.Consumer,
+		[]string{events.SubjectAdApproved}, 3, mtch.Handle)
+	if err != nil {
+		return fmt.Errorf("консьюмер bozor.ad.approved: %w", err)
+	}
+	defer ccMatch.Stop()
 
 	svc := app.NewService(favRepo, log)
 	handler := transport.NewHandler(svc, log)
+	savedSearchHandler := transport.NewSavedSearchHandler(app.NewSavedSearchService(favRepo, log))
 
 	router := transport.NewRouter(transport.Deps{
 		Log:            log,
 		Handler:        handler,
+		SavedSearch:    savedSearchHandler,
 		MetricsHandler: metricsHandler,
 		ReadyChecks: map[string]httpx.Check{
 			"postgres": pool.Ping,
