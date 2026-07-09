@@ -41,8 +41,12 @@ func NewRouter(d Deps) http.Handler {
 	r.Group(func(api chi.Router) {
 		api.Use(authx.FromForwardedHeaders)
 
-		// Создание — только аутентифицированный пользователь (владелец).
+		// Создание и действия жизненного цикла — только владелец (из идентичности).
 		api.Post("/api/v1/ads", d.Handler.Create)
+		api.Post("/api/v1/ads/{id}/submit", d.Handler.Submit)
+		api.Post("/api/v1/ads/{id}/sold", d.Handler.Sold)
+		api.Post("/api/v1/ads/{id}/renew", d.Handler.Renew)
+		api.Post("/api/v1/ads/{id}/archive", d.Handler.Archive)
 		// Чтение — публично.
 		api.Get("/api/v1/ads/{id}", d.Handler.Get)
 	})

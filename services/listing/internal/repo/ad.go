@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -79,6 +80,120 @@ func insertImages(ctx context.Context, tx pgx.Tx, adID string, images []domain.A
 		}
 	}
 	return nil
+}
+
+// execTransition выполняет условную смену статуса объявления внутри транзакции:
+// UPDATE применяется только если текущий статус совпадает с upd.From (защита от
+// гонок и переигранных событий). Nil-отметки времени сохраняются (COALESCE).
+// Возвращает число затронутых строк.
+func execTransition(ctx context.Context, tx pgx.Tx, adID string, upd domain.StatusUpdate) (int64, error) {
+	tag, err := tx.Exec(ctx, `
+		UPDATE ads SET status = $2, updated_at = now(),
+			published_at = COALESCE($3, published_at),
+			expires_at   = COALESCE($4, expires_at)
+		WHERE id = $1 AND status = $5
+	`, adID, string(upd.To), upd.PublishedAt, upd.ExpiresAt, string(upd.From))
+	if err != nil {
+		return 0, fmt.Errorf("repo: смена статуса объявления: %w", err)
+	}
+	return tag.RowsAffected(), nil
+}
+
+// TransitionWithEvent атомарно меняет статус объявления (условно по upd.From) и
+// кладёт событие в outbox. Если статус уже не upd.From (гонка/повтор) —
+// ErrInvalidTransition, событие не публикуется. Используется действиями владельца
+// (submit / sold / renew / archive), проверившими право и допустимость перехода.
+func (r *Repo) TransitionWithEvent(ctx context.Context, adID string, upd domain.StatusUpdate, ev events.Envelope) error {
+	return pgxx.WithTx(ctx, r.pool, func(tx pgx.Tx) error {
+		n, err := execTransition(ctx, tx, adID, upd)
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return domain.ErrInvalidTransition
+		}
+		return outbox.Enqueue(ctx, tx, ev)
+	})
+}
+
+// ApplyModerationWithEvent применяет решение модерации к объявлению (условно по
+// upd.From='pending'), публикует событие через outbox и отмечает событие
+// обработанным (inbox) — всё в одной транзакции. Идемпотентно: повторная
+// доставка не плодит событие (переход выполняется только из pending), но всё
+// равно отмечает событие обработанным.
+func (r *Repo) ApplyModerationWithEvent(ctx context.Context, consumer, eventID, adID string, upd domain.StatusUpdate, ev events.Envelope) error {
+	return pgxx.WithTx(ctx, r.pool, func(tx pgx.Tx) error {
+		n, err := execTransition(ctx, tx, adID, upd)
+		if err != nil {
+			return err
+		}
+		if n > 0 {
+			if err := outbox.Enqueue(ctx, tx, ev); err != nil {
+				return err
+			}
+		}
+		return outbox.MarkProcessed(ctx, tx, consumer, eventID)
+	})
+}
+
+// IsEventProcessed сообщает, обрабатывал ли consumer событие eventID (inbox).
+func (r *Repo) IsEventProcessed(ctx context.Context, consumer, eventID string) (bool, error) {
+	return outbox.AlreadyProcessed(ctx, r.pool, consumer, eventID)
+}
+
+// MarkEventProcessed помечает событие обработанным без иных изменений (пропуск:
+// объявление удалено или уже не в модерации — повторная обработка не нужна).
+func (r *Repo) MarkEventProcessed(ctx context.Context, consumer, eventID string) error {
+	return outbox.MarkProcessed(ctx, r.pool, consumer, eventID)
+}
+
+// ListExpired возвращает активные объявления с истёкшим сроком (expires_at <= now)
+// — кандидаты на перевод в expired (не более limit за проход). Дочерние сущности
+// не читаются: воркеру истечения нужны лишь поля события.
+func (r *Repo) ListExpired(ctx context.Context, now time.Time, limit int) ([]domain.Ad, error) {
+	rows, err := r.pool.Query(ctx, `SELECT `+adColumns+`
+		FROM ads WHERE status = 'active' AND expires_at IS NOT NULL AND expires_at <= $1
+		ORDER BY expires_at LIMIT $2`, now, limit)
+	if err != nil {
+		return nil, fmt.Errorf("repo: выборка истёкших объявлений: %w", err)
+	}
+	defer rows.Close()
+
+	var out []domain.Ad
+	for rows.Next() {
+		a, err := scanAd(rows)
+		if err != nil {
+			return nil, fmt.Errorf("repo: чтение истёкшего объявления: %w", err)
+		}
+		out = append(out, a)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("repo: перебор истёкших объявлений: %w", err)
+	}
+	return out, nil
+}
+
+// ExpireWithEvent переводит объявление active → expired и публикует событие в
+// outbox одной транзакцией. Условие expires_at <= now() перепроверяется в UPDATE:
+// только что продлённое (renew) объявление не будет истечено гонкой. Возвращает
+// true, если статус действительно сменился (иначе — пропуск без события).
+func (r *Repo) ExpireWithEvent(ctx context.Context, adID string, ev events.Envelope) (bool, error) {
+	var expired bool
+	err := pgxx.WithTx(ctx, r.pool, func(tx pgx.Tx) error {
+		tag, err := tx.Exec(ctx, `
+			UPDATE ads SET status = 'expired', updated_at = now()
+			WHERE id = $1 AND status = 'active' AND expires_at IS NOT NULL AND expires_at <= now()
+		`, adID)
+		if err != nil {
+			return fmt.Errorf("repo: истечение объявления: %w", err)
+		}
+		if tag.RowsAffected() == 0 {
+			return nil // уже не активно или продлено — пропуск
+		}
+		expired = true
+		return outbox.Enqueue(ctx, tx, ev)
+	})
+	return expired, err
 }
 
 // GetByID возвращает объявление со значениями атрибутов и изображениями.

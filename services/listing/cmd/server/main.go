@@ -30,6 +30,7 @@ import (
 	"bozor/services/listing/internal/config"
 	"bozor/services/listing/internal/repo"
 	"bozor/services/listing/internal/transport"
+	"bozor/services/listing/internal/worker"
 	"bozor/services/listing/migrations"
 )
 
@@ -116,7 +117,29 @@ func run() error {
 	}()
 	defer wg.Wait()
 
-	svc := app.NewService(repo.NewRepo(pool), catalogclient.New(catalogConn), log)
+	adRepo := repo.NewRepo(pool)
+
+	// Консьюмер решений модерации: bozor.ad.approved|rejected → active|rejected
+	// (Stage 3.4). До 3 попыток, затем DLQ (natsx); идемпотентность через inbox.
+	moderator := worker.NewModerator(adRepo, cfg.AdTTL, log)
+	cc, err := natsx.Consume(ctx, js, events.StreamName, worker.ModerationConsumer,
+		[]string{events.SubjectAdApproved, events.SubjectAdRejected}, 3, moderator.Handle)
+	if err != nil {
+		return fmt.Errorf("консьюмер решений модерации: %w", err)
+	}
+	defer cc.Stop()
+
+	// Воркер истечения срока: active → expired по expires_at, публикует bozor.ad.expired.
+	expirer := worker.NewExpirer(adRepo, cfg.ExpireInterval, cfg.ExpireBatch, log)
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		if err := expirer.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
+			log.Error("воркер истечения остановлен с ошибкой", slog.String("error", err.Error()))
+		}
+	}()
+
+	svc := app.NewService(adRepo, catalogclient.New(catalogConn), cfg.AdTTL, log)
 	handler := transport.NewHandler(svc, log)
 
 	router := transport.NewRouter(transport.Deps{

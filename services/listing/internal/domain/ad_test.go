@@ -19,8 +19,10 @@ func TestStatus_CanTransitionTo(t *testing.T) {
 		{StatusActive, StatusSold, true},
 		{StatusActive, StatusExpired, true},
 		{StatusActive, StatusArchived, true},
-		{StatusActive, StatusPending, false},
-		{StatusSold, StatusActive, false}, // терминальный
+		{StatusActive, StatusPending, true},   // повторная модерация после правки активного
+		{StatusExpired, StatusActive, true},   // реактивация продлением (renew)
+		{StatusExpired, StatusPending, false}, // истёкшее нельзя сразу на модерацию
+		{StatusSold, StatusActive, false},     // терминальный
 		{StatusActive, StatusBlocked, true},
 		{StatusDraft, StatusBlocked, true}, // blocked — из любого
 		{StatusSold, StatusBlocked, true},  // включая терминальные

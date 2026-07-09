@@ -21,10 +21,14 @@ import (
 func discardLogger() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
 
 type fakeService struct {
-	gotInput  app.CreateInput
-	createErr error
-	getResult domain.Ad
-	getErr    error
+	gotInput   app.CreateInput
+	createErr  error
+	getResult  domain.Ad
+	getErr     error
+	lifeResult domain.Ad
+	lifeErr    error
+	gotAdID    string
+	gotOwner   string
 }
 
 func (f *fakeService) Create(_ context.Context, in app.CreateInput) (domain.Ad, error) {
@@ -44,6 +48,30 @@ func (f *fakeService) Get(_ context.Context, _ string) (domain.Ad, error) {
 		return domain.Ad{}, f.getErr
 	}
 	return f.getResult, nil
+}
+
+func (f *fakeService) lifecycle(adID, userID string) (domain.Ad, error) {
+	f.gotAdID, f.gotOwner = adID, userID
+	if f.lifeErr != nil {
+		return domain.Ad{}, f.lifeErr
+	}
+	return f.lifeResult, nil
+}
+
+func (f *fakeService) SubmitForModeration(_ context.Context, adID, userID string) (domain.Ad, error) {
+	return f.lifecycle(adID, userID)
+}
+
+func (f *fakeService) MarkSold(_ context.Context, adID, userID string) (domain.Ad, error) {
+	return f.lifecycle(adID, userID)
+}
+
+func (f *fakeService) Renew(_ context.Context, adID, userID string) (domain.Ad, error) {
+	return f.lifecycle(adID, userID)
+}
+
+func (f *fakeService) Archive(_ context.Context, adID, userID string) (domain.Ad, error) {
+	return f.lifecycle(adID, userID)
 }
 
 func newRouter(svc Service) http.Handler {
@@ -140,6 +168,48 @@ func TestGet_OK(t *testing.T) {
 func TestGet_NotFound(t *testing.T) {
 	svc := &fakeService{getErr: domain.ErrAdNotFound}
 	rec := do(t, newRouter(svc), http.MethodGet, "/api/v1/ads/nope", "", "")
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Contains(t, rec.Body.String(), "ad_not_found")
+}
+
+func TestSubmit_AnonUnauthorized(t *testing.T) {
+	svc := &fakeService{}
+	rec := do(t, newRouter(svc), http.MethodPost, "/api/v1/ads/ad-1/submit", "", "")
+	assert.Equal(t, http.StatusUnauthorized, rec.Code)
+	assert.Empty(t, svc.gotAdID, "аноним не доходит до use-case")
+}
+
+func TestSubmit_HappyPath(t *testing.T) {
+	svc := &fakeService{lifeResult: domain.Ad{
+		ID: "ad-1", UserID: "user-1", Status: domain.StatusPending, CreatedAt: time.Unix(0, 0).UTC(),
+	}}
+	rec := do(t, newRouter(svc), http.MethodPost, "/api/v1/ads/ad-1/submit", "user-1", "")
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, "ad-1", svc.gotAdID)
+	assert.Equal(t, "user-1", svc.gotOwner, "владелец из идентичности")
+
+	var resp adResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Equal(t, "pending", resp.Status)
+}
+
+func TestSold_Forbidden(t *testing.T) {
+	svc := &fakeService{lifeErr: app.ErrForbidden}
+	rec := do(t, newRouter(svc), http.MethodPost, "/api/v1/ads/ad-1/sold", "intruder", "")
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Contains(t, rec.Body.String(), "forbidden")
+}
+
+func TestRenew_InvalidTransitionConflict(t *testing.T) {
+	svc := &fakeService{lifeErr: domain.ErrInvalidTransition}
+	rec := do(t, newRouter(svc), http.MethodPost, "/api/v1/ads/ad-1/renew", "user-1", "")
+	assert.Equal(t, http.StatusConflict, rec.Code)
+	assert.Contains(t, rec.Body.String(), "invalid_transition")
+}
+
+func TestArchive_NotFound(t *testing.T) {
+	svc := &fakeService{lifeErr: domain.ErrAdNotFound}
+	rec := do(t, newRouter(svc), http.MethodPost, "/api/v1/ads/ad-1/archive", "user-1", "")
 	assert.Equal(t, http.StatusNotFound, rec.Code)
 	assert.Contains(t, rec.Body.String(), "ad_not_found")
 }

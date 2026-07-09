@@ -48,8 +48,9 @@ const (
 var transitions = map[Status][]Status{
 	StatusDraft:    {StatusPending},
 	StatusPending:  {StatusActive, StatusRejected},
-	StatusRejected: {StatusPending}, // после правки — снова на модерацию
-	StatusActive:   {StatusSold, StatusExpired, StatusArchived},
+	StatusRejected: {StatusPending},                                            // после правки — снова на модерацию
+	StatusActive:   {StatusSold, StatusExpired, StatusArchived, StatusPending}, // pending — повторная модерация после правки
+	StatusExpired:  {StatusActive},                                             // реактивация продлением (renew)
 }
 
 // CanTransitionTo сообщает, допустим ли переход из s в to. Переход в blocked
@@ -69,6 +70,16 @@ func (s Status) Valid() bool {
 		return true
 	}
 	return false
+}
+
+// StatusUpdate описывает переход статуса объявления и опциональные отметки
+// времени. Nil-поля времени не изменяются в БД (COALESCE в репозитории), поэтому
+// переходы жизненного цикла лишь проставляют published_at/expires_at, но не сбрасывают их.
+type StatusUpdate struct {
+	From        Status
+	To          Status
+	PublishedAt *time.Time
+	ExpiresAt   *time.Time
 }
 
 // Ad — объявление (источник истины).

@@ -20,10 +20,14 @@ const source = "listing"
 // ErrCategoryNotFound — категория объявления не существует в Catalog.
 var ErrCategoryNotFound = errors.New("категория не найдена")
 
+// ErrForbidden — действие над объявлением недоступно этому пользователю.
+var ErrForbidden = errors.New("нет прав на объявление")
+
 // Store — персистентность объявлений (реализуется repo.Repo).
 type Store interface {
 	CreateWithEvent(ctx context.Context, a domain.Ad, ev events.Envelope) error
 	GetByID(ctx context.Context, id string) (domain.Ad, error)
+	TransitionWithEvent(ctx context.Context, adID string, upd domain.StatusUpdate, ev events.Envelope) error
 }
 
 // CatalogValidator отдаёт эффективный набор атрибутов категории из Catalog
@@ -36,12 +40,14 @@ type CatalogValidator interface {
 type Service struct {
 	store   Store
 	catalog CatalogValidator
+	adTTL   time.Duration
 	log     *slog.Logger
 }
 
-// NewService создаёт сервис объявлений.
-func NewService(store Store, catalog CatalogValidator, log *slog.Logger) *Service {
-	return &Service{store: store, catalog: catalog, log: log}
+// NewService создаёт сервис объявлений. adTTL — срок активного объявления
+// (используется при продлении renew; активация из модерации задаёт срок в воркере).
+func NewService(store Store, catalog CatalogValidator, adTTL time.Duration, log *slog.Logger) *Service {
+	return &Service{store: store, catalog: catalog, adTTL: adTTL, log: log}
 }
 
 // CreateInput — входные данные создания объявления.
@@ -98,7 +104,7 @@ func (s *Service) Create(ctx context.Context, in CreateInput) (domain.Ad, error)
 	}
 	ad.ID = id.String()
 
-	ev, err := events.New(events.SubjectAdCreated, source, createdPayload(ad))
+	ev, err := events.New(events.SubjectAdCreated, source, NewAdEvent(ad))
 	if err != nil {
 		return domain.Ad{}, fmt.Errorf("app: сборка события: %w", err)
 	}
@@ -113,22 +119,114 @@ func (s *Service) Get(ctx context.Context, id string) (domain.Ad, error) {
 	return s.store.GetByID(ctx, id)
 }
 
-// adCreatedEvent — полезная нагрузка bozor.ad.created (без PII).
-type adCreatedEvent struct {
-	AdID       string `json:"ad_id"`
-	UserID     string `json:"user_id"`
-	CategoryID string `json:"category_id"`
-	Status     string `json:"status"`
-	RegionID   int16  `json:"region_id"`
-	Price      int64  `json:"price"`
-	Currency   string `json:"currency"`
-	Title      string `json:"title"`
+// SubmitForModeration отправляет объявление на модерацию (draft|rejected →
+// pending) и публикует bozor.ad.updated. Доступно только владельцу.
+func (s *Service) SubmitForModeration(ctx context.Context, adID, userID string) (domain.Ad, error) {
+	return s.transition(ctx, adID, userID, func(a domain.Ad) (domain.StatusUpdate, string, error) {
+		if !a.Status.CanTransitionTo(domain.StatusPending) {
+			return domain.StatusUpdate{}, "", domain.ErrInvalidTransition
+		}
+		return domain.StatusUpdate{From: a.Status, To: domain.StatusPending}, events.SubjectAdUpdated, nil
+	})
 }
 
-// createdPayload собирает нагрузку bozor.ad.created из объявления.
-func createdPayload(a domain.Ad) adCreatedEvent {
-	return adCreatedEvent{
+// MarkSold переводит активное объявление в sold и публикует bozor.ad.sold.
+// Доступно только владельцу.
+func (s *Service) MarkSold(ctx context.Context, adID, userID string) (domain.Ad, error) {
+	return s.transition(ctx, adID, userID, func(a domain.Ad) (domain.StatusUpdate, string, error) {
+		if !a.Status.CanTransitionTo(domain.StatusSold) {
+			return domain.StatusUpdate{}, "", domain.ErrInvalidTransition
+		}
+		return domain.StatusUpdate{From: a.Status, To: domain.StatusSold}, events.SubjectAdSold, nil
+	})
+}
+
+// Archive архивирует активное объявление (active → archived) и публикует
+// bozor.ad.updated. Доступно только владельцу.
+func (s *Service) Archive(ctx context.Context, adID, userID string) (domain.Ad, error) {
+	return s.transition(ctx, adID, userID, func(a domain.Ad) (domain.StatusUpdate, string, error) {
+		if !a.Status.CanTransitionTo(domain.StatusArchived) {
+			return domain.StatusUpdate{}, "", domain.ErrInvalidTransition
+		}
+		return domain.StatusUpdate{From: a.Status, To: domain.StatusArchived}, events.SubjectAdUpdated, nil
+	})
+}
+
+// Renew продлевает срок объявления: активное — сдвигает expires_at, истёкшее —
+// реактивирует (expired → active) с новым сроком. Публикует bozor.ad.updated.
+// Доступно только владельцу.
+func (s *Service) Renew(ctx context.Context, adID, userID string) (domain.Ad, error) {
+	return s.transition(ctx, adID, userID, func(a domain.Ad) (domain.StatusUpdate, string, error) {
+		switch a.Status {
+		case domain.StatusActive, domain.StatusExpired:
+			exp := time.Now().UTC().Add(s.adTTL)
+			return domain.StatusUpdate{From: a.Status, To: domain.StatusActive, ExpiresAt: &exp}, events.SubjectAdUpdated, nil
+		default:
+			return domain.StatusUpdate{}, "", domain.ErrInvalidTransition
+		}
+	})
+}
+
+// transition — общий каркас действий владельца над жизненным циклом: читает
+// объявление (ErrAdNotFound), проверяет право (ErrForbidden), строит переход по
+// plan (ErrInvalidTransition при недопустимости), публикует событие subject и
+// применяет переход одной транзакцией. Возвращает объявление после перехода.
+func (s *Service) transition(
+	ctx context.Context, adID, userID string,
+	plan func(domain.Ad) (domain.StatusUpdate, string, error),
+) (domain.Ad, error) {
+	ad, err := s.store.GetByID(ctx, adID)
+	if err != nil {
+		return domain.Ad{}, err
+	}
+	if ad.UserID != userID {
+		return domain.Ad{}, ErrForbidden
+	}
+	upd, subject, err := plan(ad)
+	if err != nil {
+		return domain.Ad{}, err
+	}
+
+	// Отражаем переход в копии для полезной нагрузки события (БД меняет репозиторий).
+	ad.Status = upd.To
+	if upd.PublishedAt != nil {
+		ad.PublishedAt = upd.PublishedAt
+	}
+	if upd.ExpiresAt != nil {
+		ad.ExpiresAt = upd.ExpiresAt
+	}
+
+	ev, err := events.New(subject, source, NewAdEvent(ad))
+	if err != nil {
+		return domain.Ad{}, fmt.Errorf("app: сборка события: %w", err)
+	}
+	if err := s.store.TransitionWithEvent(ctx, adID, upd, ev); err != nil {
+		return domain.Ad{}, err
+	}
+	return ad, nil
+}
+
+// AdEvent — полезная нагрузка событий жизненного цикла объявления
+// (bozor.ad.created|updated|sold|expired), без PII. published_at/expires_at
+// присутствуют, когда заданы (для индексации в Search).
+type AdEvent struct {
+	AdID        string     `json:"ad_id"`
+	UserID      string     `json:"user_id"`
+	CategoryID  string     `json:"category_id"`
+	Status      string     `json:"status"`
+	RegionID    int16      `json:"region_id"`
+	Price       int64      `json:"price"`
+	Currency    string     `json:"currency"`
+	Title       string     `json:"title"`
+	PublishedAt *time.Time `json:"published_at,omitempty"`
+	ExpiresAt   *time.Time `json:"expires_at,omitempty"`
+}
+
+// NewAdEvent собирает нагрузку события жизненного цикла из объявления.
+func NewAdEvent(a domain.Ad) AdEvent {
+	return AdEvent{
 		AdID: a.ID, UserID: a.UserID, CategoryID: a.CategoryID, Status: string(a.Status),
 		RegionID: a.RegionID, Price: a.Price, Currency: a.Currency, Title: a.Title,
+		PublishedAt: a.PublishedAt, ExpiresAt: a.ExpiresAt,
 	}
 }

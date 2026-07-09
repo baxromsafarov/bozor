@@ -1,13 +1,17 @@
-status_id: "20260709-123800"
+status_id: "20260709-141500"
 project: "Bozor"
 version: "1.0"
 
 current:
   chapter: "3"                     # CHAPTER 3: Listings & Media
-  stage: "3.4"                     # STAGE 3.4: жизненный цикл объявления (переходы, воркер истечения, повторная модерация)
+  stage: "3.5"                     # STAGE 3.5: счётчик просмотров (буфер в Redis + периодический флеш)
   status: "not_started"
 
 completed:
+  - stage_id: "3.4"
+    title: "Listing: жизненный цикл объявления — статусная машина, консьюмер решений модерации (inbox), воркер истечения"
+    completed_date: "2026-07-09"
+    evidence: "Жизненный цикл объявления (ADR-020). Миграция 00002_listing_inbox: processed_events (inbox, DDL синхр. с pkg/shared/outbox). domain: статусная машина дополнена (active→pending — повторная модерация правки активного; expired→active — реактивация renew), тип StatusUpdate (From/To/PublishedAt/ExpiresAt; nil-время не сбрасывается). repo: execTransition (условный UPDATE WHERE status=$from, COALESCE времени) + TransitionWithEvent (действия владельца; 0 строк→ErrInvalidTransition) + ApplyModerationWithEvent (inbox + переход из pending + событие одной tx) + IsEventProcessed/MarkEventProcessed + ListExpired (active, expires_at<=now, idx_ads_expires) + ExpireWithEvent (active→expired с перепроверкой expires_at<=now(), возвращает «сменилось»). app.Service += adTTL; методы SubmitForModeration (draft|rejected→pending), MarkSold (active→sold), Archive (active→archived), Renew (active — сдвиг expires_at; expired→active — реактивация) — все проверяют владельца (ErrForbidden) и допустимость (ErrInvalidTransition) через общий transition; единый payload app.AdEvent (без PII; +status/published_at/expires_at для Search) для created/updated/sold/expired. worker (первые фоновые процессы Listing): Moderator (durable listing-moderation, потребляет bozor.ad.approved|rejected, maxDeliver=3→DLQ; inbox + guard status==pending; approve→active +published_at +expires_at=now+adTTL +bozor.ad.updated(active), reject→rejected) + Expirer (тикер LISTING_EXPIRE_INTERVAL, ListExpired→ExpireWithEvent пакетом LISTING_EXPIRE_BATCH, bozor.ad.expired). transport: POST /ads/{id}/submit|sold|renew|archive (владелец из forwarded-идентичности→401; ErrForbidden→403 forbidden; ErrInvalidTransition→409 invalid_transition); adResponse += published_at/expires_at. main: единый adRepo, natsx.Consume(listing-moderation) + goroutine Expirer; config LISTING_AD_TTL(720h)/LISTING_EXPIRE_INTERVAL(5m)/LISTING_EXPIRE_BATCH(100) + compose + .env(.example). Тесты: unit domain (переходы таблицей вкл. новые), app (submit happy/from-rejected/wrong-owner-403/not-found/invalid-from-sold; sold happy/not-active; renew active/expired/draft; archive), transport (submit 401/200, sold 403 forbidden, renew 409 invalid_transition, archive 404), worker (Moderator approve/reject/idempotent-skip/not-pending-mark/ad-missing-mark/unexpected-type/empty-id; Expirer sweep→status expired+событие/list-error) + integration на testcontainers postgres (TransitionWithEvent draft→pending и конфликт→ErrInvalidTransition без события; ApplyModeration идемпотентно — active+published/expires+inbox, повтор без 2-го события; ExpireFlow — ListExpired только active-истёкшие, ExpireWithEvent+повтор false, future-срок не истёк, ровно одно bozor.ad.expired) — go test PASS (default 0.04s + integration 15.8s); golangci-lint 0 issues (default+integration); gofmt чисто; go build — все 7 модулей зелёные. Живая проверка (listing-ads healthy, миграция 00002 applied=1, processed_events создана): create draft (cars, brand=toyota/year=2015) через :8085 → draft; submit→pending + bozor.ad.updated(pending); publish bozor.ad.approved (симуляция Moderation через JetStream) → active, published_at=t, expires_at=now+720h, bozor.ad.updated(active), processed_events(listing-moderation)=1; ПОВТОР того же approve (тот же event_id) → active-updated событий по-прежнему 1, inbox=1 (идемпотентно); reject другого объявления → rejected, затем submit→pending (повторная модерация); renew active сдвинул expires_at (14:10:55→14:12:47), renew expired→active (срок в будущем); чужой владелец /sold→403 forbidden, /sold на draft→409 invalid_transition; /sold→sold + bozor.ad.sold; approve+/archive→archived; воркер истечения (принудительно expires_at в прошлое, интервал 10s на время проверки) → expired + bozor.ad.expired, лог 'истёкшие объявления переведены в expired count=1'; все события в outbox published=t (relay→NATS); 4 валидных решения модерации в inbox. Прим.: POST /sold и /renew (перечислены и в 3.6) доставлены в 3.4 — в 3.6 остаются POST/GET/PATCH/DELETE /ads, лента и правка-с-повторной-модерацией поверх этой статусной машины"
   - stage_id: "3.3"
     title: "Listing-сервис: модель ads + gRPC-валидация атрибутов против Catalog — первый gRPC-контракт"
     completed_date: "2026-07-09"
@@ -83,9 +87,8 @@ completed:
     evidence: "services/location (модуль bozor/services/location в go.work). Миграции: 00001 схема (regions: id smallint PK, slug UNIQUE, name_uz/name_ru, lat/lon, sort_order; cities: id PK, region_id FK ON DELETE CASCADE, slug UNIQUE, имена/гео/sort, индекс по region_id,sort_order) + 00002 идемпотентный сид (ADR-007, ON CONFLICT DO UPDATE): 14 первичных регионов (12 областей + г.Ташкент + Респ. Каракалпакстан) и 56 городов/районов с реальными координатами WGS84 — включая 12 районов Ташкента и по 2–4 города на регион (апострофы в узбекских названиях экранированы: Farg'ona, Qo'qon, Qoraqalpog'iston и т.д.). Слой: domain (Region/City, lat/lon *float64, ErrRegionNotFound), repo (Regions/CitiesByRegion/RegionExists через pgx, ORDER BY sort_order), app (Service; Cities → 404 при несуществующем регионе, пустой список = регион без городов), transport (chi + middleware pkg/shared, GET /api/v1/locations/regions, GET /api/v1/locations/regions/{id}/cities; 422 на нечисловой id). Config: только DSN (app→PgBouncer, migrate→Postgres напрямую, ADR-013). Миграции при старте через pkg/shared/migrate. Dockerfile build-local go.work → distroless nonroot, healthcheck /location -health. Compose: сервис location + dev-порт 8082 + scrape-job prometheus. Тесты: unit (config DSN, transport regions/cities/404/422/not-found) + integration на testcontainers postgres (14 регионов, 56 городов, 12 районов Ташкента, апостроф Farg'ona, RegionExists, пустой список для чужого региона) — go test -tags=integration PASS (6.7s); golangci-lint 0 issues (default+integration). Живая проверка (15 контейнеров): миграции applied=2, рестарт→applied=0 (идемпотентно); /readyz ready; напрямую и через gateway (routing /api/v1/locations→location): 14 регионов (первый — г.Ташкент), 12 районов Ташкента, апостроф Farg'ona корректен, Самарканд/Каттакурган/Ургут; 404 неизвестный регион, 422 нечисловой id; Prometheus up{job=location}=1"
 
 next_actions:
-  - "Stage 3.4: жизненный цикл объявления — draft→pending→active/rejected; active→sold/expired/archived; blocked; повторная модерация после правки; renew; воркер истечения по expires_at; потребление bozor.ad.approved|rejected от Moderation"
   - "Stage 3.5: счётчик просмотров — буфер в Redis (INCR по ad_id) + периодический флеш в БД батчем (без write-hotspot)"
-  - "Stage 3.6: API объявлений + outbox-события — POST/GET/PATCH/DELETE /ads, sold/renew, лента GET /ads, GET /me/ads; полный набор bozor.ad.*"
+  - "Stage 3.6: API объявлений + outbox-события — POST/GET/PATCH/DELETE /ads, лента GET /ads, GET /me/ads; правка активного → повторная модерация (active→pending); полный набор bozor.ad.* (sold/renew уже доставлены в 3.4)"
 
 decisions:                         # краткие ссылки; полные ADR — в DECISIONS.md
   - decision: "Брокер — NATS JetStream (не Kafka) ради лёгкости на Compose"
@@ -136,6 +139,10 @@ decisions:                         # краткие ссылки; полные A
     rationale: "ТЗ требует gRPC для sync-вызовов; строгий контракт + breaking-checks buf; трассировка через grpcx (otel); клиент за интерфейсом CatalogValidator (тесты без сети); общий модуль pb для сервера и клиента. Первый gRPC в проекте — задаёт схему для остальных"
     date: "2026-07-09"
     alternatives: ["HTTP-вызов Catalog", "Репликация атрибутов в Listing событиями", "Валидация без Catalog"]
+  - decision: "Жизненный цикл объявления — доменная статусная машина, in-process консьюмер решений модерации (inbox) и тикер-воркер истечения (ADR-020)"
+    rationale: "Правила переходов в одном месте (domain), условный UPDATE WHERE status=$from защищает от гонок; inbox processed_events + guard status=pending дают exactly-once на bozor.ad.approved|rejected; события источника истины (updated/sold/expired) в шину транзакционно через outbox; воркеры в процессе сервиса (как Media, ADR-018)"
+    date: "2026-07-09"
+    alternatives: ["Отдельный worker-деплой", "Активация без inbox (только guard)", "pg_cron для истечения"]
 
 open_questions: []
 
@@ -152,10 +159,10 @@ tech_stack:
   deploy: ["Docker Compose", "nginx"]
 
 metrics:
-  completed_stages: 18
+  completed_stages: 19
   total_stages: 52
-  completion_percentage: 35
-  estimated_remaining_stages: 34
-  chapters_completed: ["0", "1", "2"]   # CHAPTER 0, 1, 2 завершены; CHAPTER 3 в работе — 3.1 (upload) + 3.2 (обработка) + 3.3 (модель+gRPC) готовы
+  completion_percentage: 37
+  estimated_remaining_stages: 33
+  chapters_completed: ["0", "1", "2"]   # CHAPTER 0, 1, 2 завершены; CHAPTER 3 в работе — 3.1 (upload) + 3.2 (обработка) + 3.3 (модель+gRPC) + 3.4 (жизненный цикл) готовы
 
 notes: "Backend-only, фронтенда нет. Целевая нагрузка: десятки тысяч DAU. Автономный режим работы подтверждён заказчиком. Коммиты — от имени baxromsafarov. Окружение: Windows 11, Go 1.26.4, Docker Desktop 29.2.1 + Compose v5, golangci-lint 2.12.2, goose, buf. Нюанс: локально go test без -race (нет cgo на Windows); -race выполняется в CI на Ubuntu. goconst min-occurrences=5. Инфра-нюансы (Stage 0.3): postgres:18 монтирует /var/lib/postgresql (не .../data); healthcheck typesense — через bash /dev/tcp (нет curl/wget/nc в образе). Локальный .env создаётся из .env.example (gitignore)."

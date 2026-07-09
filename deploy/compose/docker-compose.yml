@@ -429,6 +429,9 @@ services:
       PGBOUNCER_PORT: ${PGBOUNCER_PORT}
       NATS_URL: ${NATS_URL}
       CATALOG_GRPC_ADDR: catalog:9090       # валидация атрибутов против Catalog (gRPC)
+      LISTING_AD_TTL: ${LISTING_AD_TTL}                 # срок активного объявления (renew продлевает)
+      LISTING_EXPIRE_INTERVAL: ${LISTING_EXPIRE_INTERVAL} # период воркера истечения
+      LISTING_EXPIRE_BATCH: ${LISTING_EXPIRE_BATCH}     # размер пакета истечения
       OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT}
     depends_on:
       postgres:

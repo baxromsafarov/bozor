@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/url"
 	"strings"
+	"time"
 
 	"bozor/pkg/shared/config"
 )
@@ -13,6 +14,13 @@ import (
 const dbName = "bozor_listing"
 
 const defaultAddr = ":8080"
+
+// Значения по умолчанию для жизненного цикла объявлений (Stage 3.4).
+const (
+	defaultAdTTL          = 30 * 24 * time.Hour // срок активного объявления (продлевается renew)
+	defaultExpireInterval = 5 * time.Minute     // период воркера истечения
+	defaultExpireBatch    = 100                 // сколько объявлений истекает за проход
+)
 
 // Config — конфигурация Listing-сервиса.
 type Config struct {
@@ -30,6 +38,11 @@ type Config struct {
 
 	// CatalogGRPCAddr — адрес gRPC Catalog для валидации атрибутов.
 	CatalogGRPCAddr string
+
+	// Жизненный цикл объявлений (Stage 3.4).
+	AdTTL          time.Duration // срок активного объявления
+	ExpireInterval time.Duration // период воркера истечения
+	ExpireBatch    int           // размер пакета истечения
 }
 
 // Load читает конфигурацию из окружения (fail-fast на обязательных ключах).
@@ -53,6 +66,9 @@ func Load() (*Config, error) {
 			config.String("POSTGRES_PORT", "5432")),
 		NATSURL:         config.String("NATS_URL", "nats://nats:4222"),
 		CatalogGRPCAddr: config.String("CATALOG_GRPC_ADDR", "catalog:9090"),
+		AdTTL:           config.Duration("LISTING_AD_TTL", defaultAdTTL),
+		ExpireInterval:  config.Duration("LISTING_EXPIRE_INTERVAL", defaultExpireInterval),
+		ExpireBatch:     config.Int("LISTING_EXPIRE_BATCH", defaultExpireBatch),
 	}, nil
 }
 

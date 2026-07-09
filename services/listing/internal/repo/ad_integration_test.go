@@ -57,11 +57,124 @@ func newID(t *testing.T) string {
 	return id.String()
 }
 
-func createdEvent(t *testing.T, adID string) events.Envelope {
+func eventOf(t *testing.T, subject, adID string) events.Envelope {
 	t.Helper()
-	e, err := events.New(events.SubjectAdCreated, "listing", map[string]any{"ad_id": adID})
+	e, err := events.New(subject, "listing", map[string]any{"ad_id": adID})
 	require.NoError(t, err)
 	return e
+}
+
+func createdEvent(t *testing.T, adID string) events.Envelope {
+	t.Helper()
+	return eventOf(t, events.SubjectAdCreated, adID)
+}
+
+// seedAd вставляет объявление с заданным статусом и сроком (через CreateWithEvent,
+// который кладёт bozor.ad.created в outbox).
+func seedAd(t *testing.T, ctx context.Context, r *repo.Repo, status domain.Status, expiresAt *time.Time) domain.Ad {
+	t.Helper()
+	id := newID(t)
+	now := time.Now().UTC()
+	ad := domain.Ad{
+		ID: id, UserID: newID(t), CategoryID: newID(t), Title: "Объявление", Price: 1, Currency: "UZS",
+		RegionID: 1, Status: status, ExpiresAt: expiresAt, CreatedAt: now, UpdatedAt: now,
+	}
+	require.NoError(t, r.CreateWithEvent(ctx, ad, createdEvent(t, id)))
+	return ad
+}
+
+// countSubject считает события указанного subject в outbox.
+func countSubject(t *testing.T, ctx context.Context, pool *pgxpool.Pool, subject string) int {
+	t.Helper()
+	var n int
+	require.NoError(t, pool.QueryRow(ctx, "SELECT count(*) FROM outbox WHERE subject = $1", subject).Scan(&n))
+	return n
+}
+
+func TestListingRepo_TransitionWithEvent(t *testing.T) {
+	ctx := context.Background()
+	pool := startDB(t)
+	r := repo.NewRepo(pool)
+
+	ad := seedAd(t, ctx, r, domain.StatusDraft, nil)
+
+	// draft → pending применяется и публикует bozor.ad.updated.
+	upd := domain.StatusUpdate{From: domain.StatusDraft, To: domain.StatusPending}
+	require.NoError(t, r.TransitionWithEvent(ctx, ad.ID, upd, eventOf(t, events.SubjectAdUpdated, ad.ID)))
+
+	got, err := r.GetByID(ctx, ad.ID)
+	require.NoError(t, err)
+	assert.Equal(t, domain.StatusPending, got.Status)
+
+	// Повтор из draft уже невозможен (статус pending) — ErrInvalidTransition, без события.
+	err = r.TransitionWithEvent(ctx, ad.ID, upd, eventOf(t, events.SubjectAdUpdated, ad.ID))
+	assert.ErrorIs(t, err, domain.ErrInvalidTransition)
+	assert.Equal(t, 1, countSubject(t, ctx, pool, events.SubjectAdUpdated), "конфликтный переход не плодит событий")
+}
+
+func TestListingRepo_ApplyModeration_Idempotent(t *testing.T) {
+	ctx := context.Background()
+	pool := startDB(t)
+	r := repo.NewRepo(pool)
+
+	ad := seedAd(t, ctx, r, domain.StatusPending, nil)
+	now := time.Now().UTC()
+	exp := now.Add(720 * time.Hour)
+	upd := domain.StatusUpdate{From: domain.StatusPending, To: domain.StatusActive, PublishedAt: &now, ExpiresAt: &exp}
+
+	const consumer = "listing-moderation"
+	ev := eventOf(t, events.SubjectAdUpdated, ad.ID)
+	require.NoError(t, r.ApplyModerationWithEvent(ctx, consumer, ev.ID, ad.ID, upd, ev))
+
+	got, err := r.GetByID(ctx, ad.ID)
+	require.NoError(t, err)
+	assert.Equal(t, domain.StatusActive, got.Status)
+	require.NotNil(t, got.PublishedAt, "активация проставила published_at")
+	require.NotNil(t, got.ExpiresAt, "активация проставила expires_at")
+
+	done, err := r.IsEventProcessed(ctx, consumer, ev.ID)
+	require.NoError(t, err)
+	assert.True(t, done, "событие отмечено обработанным (inbox)")
+
+	// Повторное применение того же решения: объявление уже active — ни перехода, ни события.
+	require.NoError(t, r.ApplyModerationWithEvent(ctx, consumer, ev.ID, ad.ID, upd, eventOf(t, events.SubjectAdUpdated, ad.ID)))
+	assert.Equal(t, 1, countSubject(t, ctx, pool, events.SubjectAdUpdated), "повтор не публикует событие второй раз")
+}
+
+func TestListingRepo_ExpireFlow(t *testing.T) {
+	ctx := context.Background()
+	pool := startDB(t)
+	r := repo.NewRepo(pool)
+
+	past := time.Now().UTC().Add(-time.Hour)
+	future := time.Now().UTC().Add(time.Hour)
+	expiredAd := seedAd(t, ctx, r, domain.StatusActive, &past)
+	freshAd := seedAd(t, ctx, r, domain.StatusActive, &future) // срок не истёк
+	seedAd(t, ctx, r, domain.StatusDraft, &past)               // не active — игнорируется
+
+	list, err := r.ListExpired(ctx, time.Now().UTC(), 10)
+	require.NoError(t, err)
+	require.Len(t, list, 1, "только активное с истёкшим сроком")
+	assert.Equal(t, expiredAd.ID, list[0].ID)
+
+	ok, err := r.ExpireWithEvent(ctx, expiredAd.ID, eventOf(t, events.SubjectAdExpired, expiredAd.ID))
+	require.NoError(t, err)
+	assert.True(t, ok, "статус сменился на expired")
+
+	got, err := r.GetByID(ctx, expiredAd.ID)
+	require.NoError(t, err)
+	assert.Equal(t, domain.StatusExpired, got.Status)
+
+	// Повтор: уже expired — пропуск без события.
+	ok2, err := r.ExpireWithEvent(ctx, expiredAd.ID, eventOf(t, events.SubjectAdExpired, expiredAd.ID))
+	require.NoError(t, err)
+	assert.False(t, ok2)
+
+	gotFresh, err := r.GetByID(ctx, freshAd.ID)
+	require.NoError(t, err)
+	assert.Equal(t, domain.StatusActive, gotFresh.Status, "объявление с будущим сроком не истекло")
+
+	assert.Equal(t, 1, countSubject(t, ctx, pool, events.SubjectAdExpired), "ровно одно событие истечения")
 }
 
 func TestListingRepo_CreateGetWithChildren(t *testing.T) {
