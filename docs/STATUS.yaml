@@ -1,13 +1,17 @@
-status_id: "20260709-151500"
+status_id: "20260709-153000"
 project: "Bozor"
 version: "1.0"
 
 current:
   chapter: "4"                     # CHAPTER 4: Search
-  stage: "4.1"                     # STAGE 4.1: Search-сервис + схема коллекции Typesense
+  stage: "4.2"                     # STAGE 4.2: индексатор на событиях (bozor.ad.* → Typesense) + reindex
   status: "not_started"
 
 completed:
+  - stage_id: "4.1"
+    title: "Search-сервис + схема коллекции Typesense (ads: полнотекст/фасеты/сортировки/гео) — тонкий HTTP-клиент"
+    completed_date: "2026-07-09"
+    evidence: "services/search (модуль bozor/services/search в go.work) — read-модель поиска (CQRS-lite, ADR-023). Тонкий HTTP-клиент Typesense без внешних зависимостей (internal/search/client.go поверх net/http): Health (GET /health→ok), EnsureCollection (идемпотентно: GET /collections/{name}→404→POST /collections; 201/409-ок; заголовок X-TYPESENSE-API-KEY), do-хелпер (JSON, таймаут). Схема коллекции ads (collection.go, AdsSchema): title/description (string полнотекст, description optional), category_id/category_path/currency/status (string-фасеты), region_id (int32-фасет), city_id (int64-фасет opt), price (int64 sort), attrs (object фасет + enable_nested_fields=true для attrs.<slug>), created_at/bumped_at/promotion_rank (sort), is_top (bool-фасет), location (geopoint opt); default_sorting_field=created_at. Заголовок/описание — одно поле (пользовательский текст произвольного языка; двуязычие — токенизацией Typesense, не uz/ru-парой). config (TYPESENSE_HOST/PORT/API_KEY fail-fast на ключе, SEARCH_ADDR). transport (chi + middleware pkg/shared, health/ready[Health Typesense]/metrics; API поиска — 4.3). main (otel+metrics, EnsureCollection при старте, Serve). Dockerfile distroless build-local go.work. compose: сервис search (dep typesense healthy, dev-порт 8086) + prometheus scrape-job search + override-порт. Тесты: unit config (fail-fast без ключа, сборка URL, дефолты) + search (AdsSchema — поля/типы/фасеты/nested/default-sort; Health ok/not-ok/down через httptest; EnsureCollection create-on-404 с проверкой API-ключа / skip-on-200 / 409-ок) — go test PASS; golangci-lint 0 issues (исправлены goconst типов полей и G101 nolint на имя заголовка); gofmt чисто; go work sync — все 8 модулей зелёные. Живая проверка: search healthy, лог 'коллекция ads готова created=true', readyz ready (health Typesense пройден); схема в Typesense (GET /collections/ads через curl-контейнер в сети bozor_bozor) содержит все поля с верными свойствами (enable_nested_fields=true, region_id int32 sort/facet, price int64 sort, geopoint location, default_sorting_field=created_at); рестарт search → лог created=false (создание идемпотентно)"
   - stage_id: "3.6"
     title: "Listing: полный REST API объявлений (PATCH/DELETE/лента/me-ads) + полный набор bozor.ad.* — CHAPTER 3 завершён"
     completed_date: "2026-07-09"
@@ -95,9 +99,9 @@ completed:
     evidence: "services/location (модуль bozor/services/location в go.work). Миграции: 00001 схема (regions: id smallint PK, slug UNIQUE, name_uz/name_ru, lat/lon, sort_order; cities: id PK, region_id FK ON DELETE CASCADE, slug UNIQUE, имена/гео/sort, индекс по region_id,sort_order) + 00002 идемпотентный сид (ADR-007, ON CONFLICT DO UPDATE): 14 первичных регионов (12 областей + г.Ташкент + Респ. Каракалпакстан) и 56 городов/районов с реальными координатами WGS84 — включая 12 районов Ташкента и по 2–4 города на регион (апострофы в узбекских названиях экранированы: Farg'ona, Qo'qon, Qoraqalpog'iston и т.д.). Слой: domain (Region/City, lat/lon *float64, ErrRegionNotFound), repo (Regions/CitiesByRegion/RegionExists через pgx, ORDER BY sort_order), app (Service; Cities → 404 при несуществующем регионе, пустой список = регион без городов), transport (chi + middleware pkg/shared, GET /api/v1/locations/regions, GET /api/v1/locations/regions/{id}/cities; 422 на нечисловой id). Config: только DSN (app→PgBouncer, migrate→Postgres напрямую, ADR-013). Миграции при старте через pkg/shared/migrate. Dockerfile build-local go.work → distroless nonroot, healthcheck /location -health. Compose: сервис location + dev-порт 8082 + scrape-job prometheus. Тесты: unit (config DSN, transport regions/cities/404/422/not-found) + integration на testcontainers postgres (14 регионов, 56 городов, 12 районов Ташкента, апостроф Farg'ona, RegionExists, пустой список для чужого региона) — go test -tags=integration PASS (6.7s); golangci-lint 0 issues (default+integration). Живая проверка (15 контейнеров): миграции applied=2, рестарт→applied=0 (идемпотентно); /readyz ready; напрямую и через gateway (routing /api/v1/locations→location): 14 регионов (первый — г.Ташкент), 12 районов Ташкента, апостроф Farg'ona корректен, Самарканд/Каттакурган/Ургут; 404 неизвестный регион, 422 нечисловой id; Prometheus up{job=location}=1"
 
 next_actions:
-  - "Stage 4.1: Search-сервис + схема коллекции Typesense (ads: title/description uz/ru, category_path, регион/город, цена, attrs.* фасеты, created_at/bumped_at, is_top, promotion_rank, geo)"
-  - "Stage 4.2: индексатор на событиях — потребитель bozor.ad.created|updated|deleted|approved|bumped|sold|expired (outbox→consumer→Typesense), идемпотентность, DLQ, инструмент полной переиндексации"
-  - "Stage 4.3: API поиска — GET /ads/search (полнотекст uz/ru, typo, фильтры/фасеты, сортировки, пагинация, гео) + GET /ads/search/facets"
+  - "Stage 4.2: индексатор на событиях — потребитель bozor.ad.created|updated|deleted|approved|bumped|sold|expired (consumer→Typesense upsert/delete), идемпотентность, DLQ, инструмент полной переиндексации (reindex)"
+  - "Stage 4.3: API поиска — GET /ads/search (полнотекст uz/ru, typo, фильтры/фасеты, сортировки, пагинация, гео) + GET /ads/search/facets; развести маршрут /api/v1/ads/search от Listing в gateway"
+  - "Stage 4.4: заглушка топ-блока featured/TOP в выдаче до Promotions (CHAPTER 8)"
 
 decisions:                         # краткие ссылки; полные ADR — в DECISIONS.md
   - decision: "Брокер — NATS JetStream (не Kafka) ради лёгкости на Compose"
@@ -160,6 +164,10 @@ decisions:                         # краткие ссылки; полные A
     rationale: "PATCH-указатели минимизируют полезную нагрузку; правка ключевых полей активного шлёт на повторную модерацию (ARCHITECTURE §4.5); ре-валидация атрибутов против Catalog; hard-delete + событие (Search снимает индекс); простая DB-лента активных закрывает DoD CHAPTER 3, богатый поиск — в CHAPTER 4"
     date: "2026-07-09"
     alternatives: ["Полная замена PUT", "Soft-delete", "Лента только через Search с самого начала"]
+  - decision: "Search — read-модель Typesense (CQRS-lite), тонкий собственный HTTP-клиент (net/http) без typesense-go, коллекция ads (ADR-023)"
+    rationale: "Typesense REST прост/стабилен — узкий набор операций (health/collection/index/search) реализуем сами без крупной зависимости с чужой версионностью; полный контроль ошибок/таймаутов, тесты через httptest; схема ads с nested attrs для фасетов, одно поле title/description (пользовательский текст, двуязычие токенизацией)"
+    date: "2026-07-09"
+    alternatives: ["Официальный typesense-go", "PostgreSQL FTS"]
 
 open_questions: []
 
@@ -176,10 +184,10 @@ tech_stack:
   deploy: ["Docker Compose", "nginx"]
 
 metrics:
-  completed_stages: 21
+  completed_stages: 22
   total_stages: 52
-  completion_percentage: 40
-  estimated_remaining_stages: 31
-  chapters_completed: ["0", "1", "2", "3"]   # CHAPTER 0-3 завершены; CHAPTER 4 (Search) — следующий
+  completion_percentage: 42
+  estimated_remaining_stages: 30
+  chapters_completed: ["0", "1", "2", "3"]   # CHAPTER 0-3 завершены; CHAPTER 4 (Search) в работе — 4.1 (каркас+схема) готов
 
 notes: "Backend-only, фронтенда нет. Целевая нагрузка: десятки тысяч DAU. Автономный режим работы подтверждён заказчиком. Коммиты — от имени baxromsafarov. Окружение: Windows 11, Go 1.26.4, Docker Desktop 29.2.1 + Compose v5, golangci-lint 2.12.2, goose, buf. Нюанс: локально go test без -race (нет cgo на Windows); -race выполняется в CI на Ubuntu. goconst min-occurrences=5. Инфра-нюансы (Stage 0.3): postgres:18 монтирует /var/lib/postgresql (не .../data); healthcheck typesense — через bash /dev/tcp (нет curl/wget/nc в образе). Локальный .env создаётся из .env.example (gitignore)."

@@ -40,6 +40,9 @@ services:
   listing-ads:
     ports:
       - "127.0.0.1:8085:8080"   # прямой доступ к listing-ads (dev)
+  search:
+    ports:
+      - "127.0.0.1:8086:8080"   # прямой доступ к search (dev)
   grafana:
     ports:
       - "127.0.0.1:3000:3000"   # UI Grafana

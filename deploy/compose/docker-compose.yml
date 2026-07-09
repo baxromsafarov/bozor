@@ -456,6 +456,31 @@ services:
       retries: 12
     networks: [bozor]
 
+  # ---------- search: поиск объявлений (Typesense, read-модель) ----------
+  search:
+    build:
+      context: ../..
+      dockerfile: services/search/Dockerfile
+    environment:
+      SEARCH_ADDR: ":8080"
+      APP_ENV: ${APP_ENV}
+      LOG_LEVEL: ${LOG_LEVEL}
+      TYPESENSE_HOST: ${TYPESENSE_HOST}
+      TYPESENSE_PORT: ${TYPESENSE_PORT}
+      TYPESENSE_API_KEY: ${TYPESENSE_API_KEY}
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT}
+    depends_on:
+      typesense:
+        condition: service_healthy
+      tempo:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "/search", "-health"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    networks: [bozor]
+
   # ---------- nginx: edge (TLS, LB) перед API Gateway ----------
   nginx:
     image: nginx:1.29-alpine
