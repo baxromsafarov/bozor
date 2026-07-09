@@ -96,44 +96,46 @@ func (s *Service) StartConversation(ctx context.Context, adID, buyerID string) (
 }
 
 // SendMessage отправляет сообщение от участника диалога и публикует
-// bozor.chat.message_sent для уведомления адресата.
-func (s *Service) SendMessage(ctx context.Context, conversationID, senderID, body string) (domain.Message, error) {
+// bozor.chat.message_sent для уведомления адресата. Возвращает также id адресата
+// (второго участника) — для realtime-доставки по WebSocket (7.2).
+func (s *Service) SendMessage(ctx context.Context, conversationID, senderID, body string) (domain.Message, string, error) {
 	if err := domain.ValidateBody(body); err != nil {
-		return domain.Message{}, err
+		return domain.Message{}, "", err
 	}
 	conv, found, err := s.store.GetConversation(ctx, conversationID)
 	if err != nil {
-		return domain.Message{}, err
+		return domain.Message{}, "", err
 	}
 	if !found {
-		return domain.Message{}, ErrConversationNotFound
+		return domain.Message{}, "", ErrConversationNotFound
 	}
 	if !conv.Participant(senderID) {
-		return domain.Message{}, ErrNotParticipant
+		return domain.Message{}, "", ErrNotParticipant
 	}
+	recipient := conv.Counterpart(senderID)
 	id, err := s.newID()
 	if err != nil {
-		return domain.Message{}, fmt.Errorf("app: генерация id сообщения: %w", err)
+		return domain.Message{}, "", fmt.Errorf("app: генерация id сообщения: %w", err)
 	}
 	msg := domain.Message{
 		ID: id, ConversationID: conversationID, SenderID: senderID,
 		Body: strings.TrimSpace(body), CreatedAt: s.now(),
 	}
 	// Событие адресату. В 7.1 публикуется на каждое сообщение (Notification →
-	// Telegram); гейтинг по онлайн-статусу получателя добавит WebSocket (7.2).
+	// Telegram); гейтинг по онлайн-статусу получателя — 7.3.
 	ev, err := events.New(events.SubjectChatMessageSent, source, messageSentPayload{
-		UserID: conv.Counterpart(senderID), ConversationID: conversationID,
+		UserID: recipient, ConversationID: conversationID,
 		AdID: conv.AdID, SenderID: senderID, MessageID: id,
 	})
 	if err != nil {
-		return domain.Message{}, fmt.Errorf("app: сборка bozor.chat.message_sent: %w", err)
+		return domain.Message{}, "", fmt.Errorf("app: сборка bozor.chat.message_sent: %w", err)
 	}
 	if err := s.store.InsertMessageWithEvent(ctx, msg, ev); err != nil {
-		return domain.Message{}, err
+		return domain.Message{}, "", err
 	}
 	s.log.InfoContext(ctx, "сообщение отправлено",
 		slog.String("conversation_id", conversationID), slog.String("sender_id", senderID))
-	return msg, nil
+	return msg, recipient, nil
 }
 
 // ListConversations возвращает диалоги пользователя.

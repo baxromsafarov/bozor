@@ -1,13 +1,17 @@
-status_id: "20260710-020000"
+status_id: "20260710-033000"
 project: "Bozor"
 version: "1.0"
 
 current:
   chapter: "7"                     # CHAPTER 7: Chat
-  stage: "7.2"                     # STAGE 7.2: WebSocket + backplane между репликами
+  stage: "7.3"                     # STAGE 7.3: доставка и статусы (онлайн/оффлайн, read_at, непрочитанные)
   status: "not_started"
 
 completed:
+  - stage_id: "7.2"
+    title: "Chat WebSocket + backplane — эндпоинт /ws с самостоятельной JWT-аутентификацией (мимо gateway), доставка между репликами через NATS core pub/sub (chat.rt.<userID>), отправка по WS через app.SendMessage"
+    completed_date: "2026-07-10"
+    evidence: "Realtime-транспорт чата (ADR-035; ARCHITECTURE §4.9; ROADMAP 7.2). Пакет internal/ws: Backplane (интерфейс Publish/Subscribe + NATSBackplane на core pub/sub — эфемерная доставка, не JetStream; subject chat.rt.<userID>), Hub (реестр локальных соединений реплики + одна подписка backplane на пользователя с refcount по числу соединений, доставка входящего кадра во все локальные сокеты пользователя, Publish→backplane), Conn (буферизированный канал send=32, closeSlow при переполнении — медленный клиент отключается, переподключится и перечитает историю REST), Handler (ServeWS: authx.Parse токена [query ?token= или Authorization: Bearer] → 401 до апгрейда при невалидном; websocket.Accept с InsecureSkipVerify [CSWSH неактуален при bearer-аутентификации, не куки; TLS-край nginx]; регистрация в Hub; отдельные горутины writeLoop [единственный писатель тянет send-буфер — coder/websocket запрещает конкурентную запись] и readLoop [клиентские кадры {conversation_id, body} → app.SendMessage → publish адресату в backplane + ack отправителю]; контекст соединения отменяется при закрытии сокета ИЛИ baseCtx [graceful shutdown]), frame (кадры message/ack/error, JSON). app.SendMessage теперь возвращает (Message, recipientID, error) — id адресата для realtime-доставки (REST игнорирует третье значение). Протокол WS: client→server {conversation_id, body}; server→client {type:message|ack|error,…}. config/compose: JWT_SIGNING_KEY добавлен в Chat (обязателен — /ws мимо gateway). Роутер: r.Get(/ws) без auth-middleware (обработчик сам аутентифицирует). nginx уже проксирует location /ws→chat с upgrade-заголовками (задел). Зависимости: github.com/coder/websocket v1.8.14, github.com/nats-io/nats.go (core pub/sub поверх того же nats.Conn, что и JetStream-outbox). Тесты: unit ws (Hub: одна подписка на пользователя+refcount, отписка при последнем соединении, доставка во все локальные соединения, Publish→backplane, доставка неизвестному без паники; frame: token query/header/пусто, classify ошибок, JSON-форма message/ack/error) + in-process integration (loopback-backplane синхронно вызывает подписчиков как NATS на одном узле; httptest+websocket.Dial: bad-token→401, отправка→ack отправителю+кадр message получателю через backplane с корректными полями, не-участник→кадр error forbidden) — go test PASS; golangci-lint 0 issues; gofmt чисто. Живая проверка (ДВЕ реплики chat: :8092 [compose] и :8093 [docker run на той же сети/NATS], общий backplane): временный e2e-клиент минтит JWT покупателя/продавца тем же ключом; продавец подключается к РЕПЛИКЕ B, покупатель к РЕПЛИКЕ A и шлёт сообщение по WS → покупатель получил ack, продавец получил кадр message через NATS-backplane (cross-replica доставка — ключевая проверка 7.2); тот же сценарий обе стороны на одной реплике — тоже доставка; сообщение сохранено в bozor_chat.messages (валидный UTF-8), bozor.chat.message_sent в outbox relayed (тот же путь app.SendMessage, что и REST 7.1); WS без токена/мусорный токен→401. После проверки реплика 2 удалена, временный e2e-клиент удалён. Прим.: гейтинг публикации bozor.chat.message_sent по онлайн-статусу получателя — 7.3 (сейчас публикуется на каждое сообщение, 7.1 baseline; presence через Redis/NATS request-reply); отметки прочтения (read_at)/счётчики непрочитанных — 7.3; sticky-балансировка WS на nginx — оптимизация (backplane делает доставку независимой от реплики); ping/pong keepalive, лимиты соединений на пользователя, rate-limit/жалоба на сообщение — 7.4"
   - stage_id: "7.1"
     title: "Chat-сервис: модель диалогов + REST-история — conversations (уникальность ad_id+buyer_id+seller_id)/messages, продавец из Listing, POST/GET conversations+messages, публикация bozor.chat.message_sent→Notification; CHAPTER 7 начат"
     completed_date: "2026-07-10"
@@ -143,8 +147,8 @@ completed:
     evidence: "services/location (модуль bozor/services/location в go.work). Миграции: 00001 схема (regions: id smallint PK, slug UNIQUE, name_uz/name_ru, lat/lon, sort_order; cities: id PK, region_id FK ON DELETE CASCADE, slug UNIQUE, имена/гео/sort, индекс по region_id,sort_order) + 00002 идемпотентный сид (ADR-007, ON CONFLICT DO UPDATE): 14 первичных регионов (12 областей + г.Ташкент + Респ. Каракалпакстан) и 56 городов/районов с реальными координатами WGS84 — включая 12 районов Ташкента и по 2–4 города на регион (апострофы в узбекских названиях экранированы: Farg'ona, Qo'qon, Qoraqalpog'iston и т.д.). Слой: domain (Region/City, lat/lon *float64, ErrRegionNotFound), repo (Regions/CitiesByRegion/RegionExists через pgx, ORDER BY sort_order), app (Service; Cities → 404 при несуществующем регионе, пустой список = регион без городов), transport (chi + middleware pkg/shared, GET /api/v1/locations/regions, GET /api/v1/locations/regions/{id}/cities; 422 на нечисловой id). Config: только DSN (app→PgBouncer, migrate→Postgres напрямую, ADR-013). Миграции при старте через pkg/shared/migrate. Dockerfile build-local go.work → distroless nonroot, healthcheck /location -health. Compose: сервис location + dev-порт 8082 + scrape-job prometheus. Тесты: unit (config DSN, transport regions/cities/404/422/not-found) + integration на testcontainers postgres (14 регионов, 56 городов, 12 районов Ташкента, апостроф Farg'ona, RegionExists, пустой список для чужого региона) — go test -tags=integration PASS (6.7s); golangci-lint 0 issues (default+integration). Живая проверка (15 контейнеров): миграции applied=2, рестарт→applied=0 (идемпотентно); /readyz ready; напрямую и через gateway (routing /api/v1/locations→location): 14 регионов (первый — г.Ташкент), 12 районов Ташкента, апостроф Farg'ona корректен, Самарканд/Каттакурган/Ургут; 404 неизвестный регион, 422 нечисловой id; Prometheus up{job=location}=1"
 
 next_actions:
-  - "Stage 7.2: WebSocket + backplane — WS-эндпоинт /ws (аутентификация по идентичности), доставка онлайн-получателю в реальном времени; Redis Pub/Sub или NATS как backplane между репликами chat (отправитель и получатель на разных инстансах); гейтинг публикации bozor.chat.message_sent по онлайн-статусу получателя (сейчас 7.1 публикует на каждое сообщение); nginx sticky/upgrade для WS"
-  - "CHAPTER 7 (Chat, продолжение): 7.3 доставка и статусы (read_at, счётчики непрочитанных, оффлайн→Telegram); 7.4 модерация/лимиты чата (rate-limit отправки, жалоба на сообщение target_type=message — задел ADR-033, блокировка в чате)"
+  - "Stage 7.3: доставка и статусы — гейтинг публикации bozor.chat.message_sent по онлайн-статусу получателя (presence: Redis-ключ с TTL или NATS request-reply; сейчас 7.2 публикует всегда — 7.1 baseline); отметки о прочтении (read_at) и WS-кадр read; счётчики непрочитанных на диалог; оффлайн→Telegram (Notification уже потребляет событие)"
+  - "CHAPTER 7 (Chat, продолжение): 7.4 модерация/лимиты чата (rate-limit отправки, жалоба на сообщение target_type=message — задел ADR-033, блокировка в чате); ping/pong keepalive и лимиты соединений на пользователя"
   - "CHAPTER 8 (Payments/Promotions): промо-услуги (top/lift/highlight), провайдеры Payme/Click/Mock, bozor.promotion.activated/bozor.payment.* (Notification/Search уже потребляют is_top/promotion_rank — задел 4.4)"
 
 decisions:                         # краткие ссылки; полные ADR — в DECISIONS.md
@@ -264,10 +268,10 @@ tech_stack:
   deploy: ["Docker Compose", "nginx"]
 
 metrics:
-  completed_stages: 33
+  completed_stages: 34
   total_stages: 52
-  completion_percentage: 63
-  estimated_remaining_stages: 19
-  chapters_completed: ["0", "1", "2", "3", "4", "5", "6"]   # CHAPTER 0-6 завершены; CHAPTER 7 (Chat) в работе: 7.1 модель+REST-история готова, дальше 7.2 WebSocket+backplane
+  completion_percentage: 65
+  estimated_remaining_stages: 18
+  chapters_completed: ["0", "1", "2", "3", "4", "5", "6"]   # CHAPTER 0-6 завершены; CHAPTER 7 (Chat) в работе: 7.1 REST-история + 7.2 WebSocket/backplane готовы, дальше 7.3 доставка/статусы
 
 notes: "Backend-only, фронтенда нет. Целевая нагрузка: десятки тысяч DAU. Автономный режим работы подтверждён заказчиком. Коммиты — от имени baxromsafarov. Окружение: Windows 11, Go 1.26.4, Docker Desktop 29.2.1 + Compose v5, golangci-lint 2.12.2, goose, buf. Нюанс: локально go test без -race (нет cgo на Windows); -race выполняется в CI на Ubuntu. goconst min-occurrences=5. Инфра-нюансы (Stage 0.3): postgres:18 монтирует /var/lib/postgresql (не .../data); healthcheck typesense — через bash /dev/tcp (нет curl/wget/nc в образе). Локальный .env создаётся из .env.example (gitignore)."

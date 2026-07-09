@@ -26,10 +26,11 @@ const (
 	maxConvLimit    = 100
 )
 
-// Chat — use-cases чата (реализуется app.Service).
+// Chat — use-cases чата (реализуется app.Service). SendMessage возвращает также
+// id адресата (используется WS-транспортом для realtime-доставки; REST его игнорирует).
 type Chat interface {
 	StartConversation(ctx context.Context, adID, buyerID string) (domain.Conversation, error)
-	SendMessage(ctx context.Context, conversationID, senderID, body string) (domain.Message, error)
+	SendMessage(ctx context.Context, conversationID, senderID, body string) (domain.Message, string, error)
 	ListConversations(ctx context.Context, userID string, limit int) ([]domain.Conversation, error)
 	ListMessages(ctx context.Context, conversationID, userID string, limit int) ([]domain.Message, error)
 }
@@ -127,7 +128,7 @@ func (h *ConversationHandler) Send(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteProblem(w, r, err)
 		return
 	}
-	msg, err := h.chat.SendMessage(r.Context(), chi.URLParam(r, "id"), authx.UserID(r.Context()), req.Body)
+	msg, _, err := h.chat.SendMessage(r.Context(), chi.URLParam(r, "id"), authx.UserID(r.Context()), req.Body)
 	if err != nil {
 		h.writeError(w, r, err)
 		return

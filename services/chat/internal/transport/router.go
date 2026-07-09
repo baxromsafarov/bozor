@@ -14,10 +14,16 @@ import (
 
 const serviceName = "chat"
 
+// WSHandler — обработчик WebSocket-эндпоинта /ws (реализуется ws.Handler).
+type WSHandler interface {
+	ServeWS(w http.ResponseWriter, r *http.Request)
+}
+
 // Deps — зависимости для сборки роутера Chat-сервиса.
 type Deps struct {
 	Log            *slog.Logger
 	Conversations  *ConversationHandler
+	WS             WSHandler
 	ReadyChecks    map[string]httpx.Check
 	MetricsHandler http.Handler
 }
@@ -36,6 +42,12 @@ func NewRouter(d Deps) http.Handler {
 	r.Get("/readyz", httpx.ReadyHandler(d.ReadyChecks))
 	if d.MetricsHandler != nil {
 		r.Handle("/metrics", d.MetricsHandler)
+	}
+
+	// WebSocket чата (nginx проксирует /ws напрямую в chat, мимо gateway) —
+	// обработчик сам аутентифицирует соединение по JWT.
+	if d.WS != nil {
+		r.Get("/ws", d.WS.ServeWS)
 	}
 
 	// Чат — любой аутентифицированный пользователь (доступ к своим диалогам).

@@ -99,9 +99,10 @@ func TestSendMessage_PublishesEventToCounterpart(t *testing.T) {
 	store := &fakeStore{conv: domain.Conversation{ID: "c1", AdID: "ad1", BuyerID: "buyer1", SellerID: "seller1"}, found: true}
 	svc := app.NewService(store, fakeAds{}, discardLog())
 
-	msg, err := svc.SendMessage(context.Background(), "c1", "buyer1", "  привет  ")
+	msg, recipient, err := svc.SendMessage(context.Background(), "c1", "buyer1", "  привет  ")
 	require.NoError(t, err)
 	assert.Equal(t, "привет", msg.Body, "тело обрезано")
+	assert.Equal(t, "seller1", recipient, "адресат — второй участник")
 
 	assert.Equal(t, events.SubjectChatMessageSent, store.insertedEv.Type)
 	var pl struct {
@@ -118,19 +119,19 @@ func TestSendMessage_PublishesEventToCounterpart(t *testing.T) {
 func TestSendMessage_NotParticipant(t *testing.T) {
 	store := &fakeStore{conv: domain.Conversation{ID: "c1", BuyerID: "buyer1", SellerID: "seller1"}, found: true}
 	svc := app.NewService(store, fakeAds{}, discardLog())
-	_, err := svc.SendMessage(context.Background(), "c1", "stranger", "привет")
+	_, _, err := svc.SendMessage(context.Background(), "c1", "stranger", "привет")
 	assert.ErrorIs(t, err, app.ErrNotParticipant)
 }
 
 func TestSendMessage_ConversationNotFound(t *testing.T) {
 	svc := app.NewService(&fakeStore{found: false}, fakeAds{}, discardLog())
-	_, err := svc.SendMessage(context.Background(), "c1", "buyer1", "привет")
+	_, _, err := svc.SendMessage(context.Background(), "c1", "buyer1", "привет")
 	assert.ErrorIs(t, err, app.ErrConversationNotFound)
 }
 
 func TestSendMessage_EmptyBodyRejected(t *testing.T) {
 	svc := app.NewService(&fakeStore{}, fakeAds{}, discardLog())
-	_, err := svc.SendMessage(context.Background(), "c1", "buyer1", "   ")
+	_, _, err := svc.SendMessage(context.Background(), "c1", "buyer1", "   ")
 	assert.ErrorIs(t, err, domain.ErrEmptyBody, "пустое тело не читает диалог")
 }
 

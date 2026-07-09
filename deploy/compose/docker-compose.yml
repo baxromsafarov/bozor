@@ -642,15 +642,16 @@ services:
       POSTGRES_PORT: ${POSTGRES_PORT}
       PGBOUNCER_HOST: ${PGBOUNCER_HOST}
       PGBOUNCER_PORT: ${PGBOUNCER_PORT}
-      NATS_URL: ${NATS_URL}                          # publish bozor.chat.message_sent
+      NATS_URL: ${NATS_URL}                          # publish bozor.chat.message_sent + backplane WS
       LISTING_INTERNAL_URL: http://listing-ads:8080  # по объявлению определяется продавец
+      JWT_SIGNING_KEY: ${JWT_SIGNING_KEY}            # WS /ws идёт мимо gateway — чат сам проверяет токен
       OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT}
     depends_on:
       postgres:
         condition: service_healthy
       pgbouncer:
         condition: service_healthy
-      nats:                  # publish bozor.chat.message_sent
+      nats:                  # publish bozor.chat.message_sent + backplane WS
         condition: service_healthy
       tempo:
         condition: service_started

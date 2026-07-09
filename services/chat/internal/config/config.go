@@ -31,11 +31,15 @@ type Config struct {
 	// ListingInternalURL — базовый URL внутреннего read-эндпоинта Listing
 	// (по объявлению определяется продавец — владелец объявления).
 	ListingInternalURL string
+
+	// JWTSigningKey — ключ проверки подписи access-JWT. WebSocket-эндпоинт /ws
+	// идёт мимо gateway (nginx→chat), поэтому чат сам проверяет токен.
+	JWTSigningKey []byte
 }
 
 // Load читает конфигурацию из окружения (fail-fast на обязательных ключах).
 func Load() (*Config, error) {
-	if missing := config.Missing("POSTGRES_USER", "POSTGRES_PASSWORD"); len(missing) > 0 {
+	if missing := config.Missing("POSTGRES_USER", "POSTGRES_PASSWORD", "JWT_SIGNING_KEY"); len(missing) > 0 {
 		return nil, fmt.Errorf("config: не заданы обязательные переменные: %s", strings.Join(missing, ", "))
 	}
 
@@ -54,6 +58,7 @@ func Load() (*Config, error) {
 			config.String("POSTGRES_PORT", "5432")),
 		NATSURL:            config.String("NATS_URL", "nats://nats:4222"),
 		ListingInternalURL: config.String("LISTING_INTERNAL_URL", "http://listing-ads:8080"),
+		JWTSigningKey:      []byte(config.String("JWT_SIGNING_KEY", "")),
 	}, nil
 }
 

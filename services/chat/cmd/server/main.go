@@ -29,6 +29,7 @@ import (
 	"bozor/services/chat/internal/listingclient"
 	"bozor/services/chat/internal/repo"
 	"bozor/services/chat/internal/transport"
+	"bozor/services/chat/internal/ws"
 	"bozor/services/chat/migrations"
 )
 
@@ -113,9 +114,15 @@ func run() error {
 	listing := listingclient.New(cfg.ListingInternalURL, config.ListingTimeout)
 	chatSvc := app.NewService(store, listing, log)
 
+	// WebSocket: реестр соединений + backplane между репликами через NATS core
+	// pub/sub. baseCtx (ctx сигналов) закрывает соединения при остановке сервиса.
+	hub := ws.NewHub(ws.NewNATSBackplane(nc), log)
+	wsHandler := ws.NewHandler(ctx, hub, chatSvc, cfg.JWTSigningKey, log)
+
 	router := transport.NewRouter(transport.Deps{
 		Log:            log,
 		Conversations:  transport.NewConversationHandler(chatSvc, log),
+		WS:             wsHandler,
 		MetricsHandler: metricsHandler,
 		ReadyChecks: map[string]httpx.Check{
 			"postgres": pool.Ping,

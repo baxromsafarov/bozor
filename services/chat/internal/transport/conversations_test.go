@@ -35,12 +35,12 @@ func (f *fakeChat) StartConversation(_ context.Context, adID, buyerID string) (d
 		CreatedAt: time.Unix(1, 0).UTC(), LastMessageAt: time.Unix(1, 0).UTC()}, nil
 }
 
-func (f *fakeChat) SendMessage(_ context.Context, convID, senderID, body string) (domain.Message, error) {
+func (f *fakeChat) SendMessage(_ context.Context, convID, senderID, body string) (domain.Message, string, error) {
 	f.gotConvID, f.gotSender, f.gotBody = convID, senderID, body
 	if f.sendErr != nil {
-		return domain.Message{}, f.sendErr
+		return domain.Message{}, "", f.sendErr
 	}
-	return domain.Message{ID: "m1", ConversationID: convID, SenderID: senderID, Body: body, CreatedAt: time.Unix(2, 0).UTC()}, nil
+	return domain.Message{ID: "m1", ConversationID: convID, SenderID: senderID, Body: body, CreatedAt: time.Unix(2, 0).UTC()}, "seller1", nil
 }
 
 func (f *fakeChat) ListConversations(context.Context, string, int) ([]domain.Conversation, error) {
