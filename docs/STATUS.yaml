@@ -1,33 +1,17 @@
-status_id: "20260710-190000"
+status_id: "20260709-114500"
 project: "Bozor"
 version: "1.0"
 
 current:
   chapter: "3"                     # CHAPTER 3: Listings & Media
-  stage: "3.1"                     # STAGE 3.1: Media-сервис — загрузка (POST /media, MinIO, таблица media)
-  status: "in_progress"
-  wip:                             # чекпоинт на 2026-07-08 — продолжить отсюда
-    done:
-      - "Модуль services/media (bozor/services/media) добавлен в go.work; go.mod (go 1.26), зависимости minio-go/v7 + pgx + chi + uuid подтянуты (go mod tidy)"
-      - "Новые subjects в pkg/shared/events: bozor.media.uploaded/processed/deleted"
-      - "Миграция 00001_init_media: таблица media (id, owner_user_id, ad_id NULL, bucket, object_key UNIQUE, mime_type, size_bytes CHECK>0, status CHECK uploaded/ready/orphan, width/height NULL, created_at; индексы idx_media_ad partial, idx_media_owner) + outbox (DDL синхр. с pkg/shared/outbox)"
-      - "domain: Media, Status, Limits, AllowedTypes (jpeg/png/webp), ExtFor, ValidateUpload (пустой/тип/размер); sentinel ErrMediaNotFound/EmptyFile/FileTooLarge/UnsupportedType/AdMediaLimit/MissingOwner"
-      - "storage/minio.go: Store поверх minio-go (New, EnsureBucket идемпотентно, Put, Remove, PublicURL, Ping для readyz)"
-      - "repo: InsertWithEvent (pgxx.WithTx + outbox), GetByID, CountByAd (лимит на объявление)"
-      - "app.Service.Upload: проверка владельца, ValidateUpload, лимит на ad_id, UUIDv7 → object_key originals/<id>.<ext>, Put→InsertWithEvent, компенсация (blob.Remove) при сбое вставки; событие bozor.media.uploaded (без PII); Get с публичным URL"
-      - "transport: POST /api/v1/media (multipart, MaxBytesReader, sniff типа через http.DetectContentType — НЕ доверяя клиенту, owner из forwarded-идентичности→401 если аноним), GET /api/v1/media/{id}; writeMediaError→RFC 7807; router с middleware pkg/shared + health/ready/metrics"
-      - "cmd/server/main.go (миграции+otel+metrics+pgx+MinIO EnsureBucket+NATS/relay+wiring), Dockerfile (build-local go.work → distroless)"
-      - "compose: сервис media (deps postgres/pgbouncer/minio/nats healthy, tempo started) + override dev-порт 8084 + prometheus scrape-job media"
-      - "Тесты: unit domain (ValidateUpload таблицей, ExtFor) + app (Upload happy/owner/type/size/ad-limit/компенсация, Get) — go test PASS; golangci-lint 0 issues; gofmt чисто"
-      - "Gateway уже маршрутизирует /api/v1/media→media (routes.go, из 0.4)"
-    remaining:
-      - "Тесты transport/media_test.go: 401 аноним, 422 нет файла/неподдерж.тип(sniff PDF)/too-large, 409 ad_media_limit, 201 happy (multipart), Get 200/404 (использовать httptest + multipart.Writer, PNG-магию \\x89PNG для валидного sniff)"
-      - "Интеграционный тест repo (build-tag integration, testcontainers postgres:18): InsertWithEvent+GetByID+CountByAd+outbox count; опц. MinIO через testcontainers для storage"
-      - "go work sync и проверка, что все модули собираются/тесты зелёные (default+integration)"
-      - "Живая проверка: docker compose build media + up; upload реальной картинки через gateway → 201 {id,url,mime,size,status,created_at}; объект в MinIO (mc ls/HTTP GET по url); строка в media; событие bozor.media.uploaded в outbox→relay→NATS (стрим BOZOR растёт); аноним→401; PDF/битый тип→422 unsupported_type; >10MiB→422 file_too_large; лимит на ad_id (11-я картинка→409)"
-      - "Завершить стадию: STATUS.yaml (3.1 completed, metrics 16/52), DECISIONS при необходимости (ADR по хранению медиа/object-key/публичным URL — если решение нетривиально), commit + push"
+  stage: "3.2"                     # STAGE 3.2: воркер обработки медиа (превью, EXIF, presigned/CDN, очистка сирот)
+  status: "not_started"
 
 completed:
+  - stage_id: "3.1"
+    title: "Media-сервис — загрузка оригиналов в MinIO (POST /media, таблица media)"
+    completed_date: "2026-07-09"
+    evidence: "services/media (модуль bozor/services/media в go.work). Новые subjects в pkg/shared/events: bozor.media.uploaded/processed/deleted. Миграция 00001_init_media: media (id uuid PK, owner_user_id, ad_id NULL — БЕЗ FK на ads: db-per-service, ADR-017, связь финализируется в ad_images 3.3, object_key UNIQUE, size_bytes CHECK>0, status CHECK uploaded/ready/orphan, width/height NULL до обработки; частичный idx_media_ad WHERE ad_id IS NOT NULL + idx_media_owner) + outbox (DDL синхр. с pkg/shared/outbox). Domain: Media/Status/Limits, AllowedTypes jpeg/png/webp→ExtFor, ValidateUpload (пустой/тип/размер); sentinel ErrMediaNotFound/EmptyFile/FileTooLarge/UnsupportedType/AdMediaLimit/MissingOwner. storage/minio.go поверх minio-go/v7 (New, EnsureBucket идемпотентно, Put, Remove, PublicURL, Ping для readyz). repo: InsertWithEvent (pgxx.WithTx + outbox одной tx), GetByID, CountByAd. app.Upload: владелец обязателен, ValidateUpload, лимит на ad_id, UUIDv7→object_key originals/<id>.<ext>, Put→InsertWithEvent, компенсация (blob.Remove) при сбое вставки; событие bozor.media.uploaded без PII; Get с публичным URL. transport: POST /api/v1/media (multipart, MaxBytesReader на теле, тип определяется сервером через http.DetectContentType — НЕ доверяя клиенту, owner из forwarded-идентичности→401 аноним), GET /api/v1/media/{id} публично; writeMediaError→RFC 7807. main: миграции+otel+metrics+pgx+MinIO EnsureBucket+NATS/relay+wiring; Dockerfile distroless; compose (deps postgres/pgbouncer/minio/nats healthy) + dev-порт 8084 + scrape-job. ADR-017 (хранение оригиналов в объектном хранилище, тип по содержимому, лимит на объявление, ad_id без кросс-БД FK). Тесты: unit domain (ValidateUpload таблицей, ExtFor) + app (Upload happy/owner/type/size/ad-limit/компенсация, Get) + transport (401 аноним, 201 happy multipart, 422 missing_file/unsupported_type[sniff PDF при заявленном image/png]/file_too_large[MaxBytesReader], 409 ad_media_limit, Get 200/404) + integration на testcontainers postgres:18 (InsertWithEvent+GetByID со всеми полями, CountByAd игнорирует ad_id NULL, outbox=3 по событию на вставку, дубль object_key→ошибка+откат tx без лишнего события) — go test PASS (default+integration); golangci-lint 0 issues (оба build-тега); gofmt чисто; go work sync — все 6 модулей собираются/vet/тесты зелёные. Живая проверка (media healthy, миграции applied=1): upload реального PNG через gateway (JWT→X-User-Id) → 201 {id,url,mime_type:image/png,size_bytes:70,status:uploaded,created_at}; объект в MinIO (HTTP 200 content-type image/png по публичному URL); строка в media (owner из JWT, ad_id, object_key, status uploaded); событие bozor.media.uploaded в outbox published=t → NATS стрим BOZOR messages=1; GET /media/{id}→200, неизвестный→404; аноним upload→401 unauthorized; PDF с заявленным image/png→422 unsupported_type (сервер сниффит содержимое); 12 MiB→422 file_too_large; 10 картинок на один ad_id→201, 11-я→409 ad_media_limit (в БД ровно 10)"
   - stage_id: "0.1"
     title: "Repo & monorepo structure, tooling"
     completed_date: "2026-07-06"
@@ -91,9 +75,8 @@ completed:
     evidence: "services/location (модуль bozor/services/location в go.work). Миграции: 00001 схема (regions: id smallint PK, slug UNIQUE, name_uz/name_ru, lat/lon, sort_order; cities: id PK, region_id FK ON DELETE CASCADE, slug UNIQUE, имена/гео/sort, индекс по region_id,sort_order) + 00002 идемпотентный сид (ADR-007, ON CONFLICT DO UPDATE): 14 первичных регионов (12 областей + г.Ташкент + Респ. Каракалпакстан) и 56 городов/районов с реальными координатами WGS84 — включая 12 районов Ташкента и по 2–4 города на регион (апострофы в узбекских названиях экранированы: Farg'ona, Qo'qon, Qoraqalpog'iston и т.д.). Слой: domain (Region/City, lat/lon *float64, ErrRegionNotFound), repo (Regions/CitiesByRegion/RegionExists через pgx, ORDER BY sort_order), app (Service; Cities → 404 при несуществующем регионе, пустой список = регион без городов), transport (chi + middleware pkg/shared, GET /api/v1/locations/regions, GET /api/v1/locations/regions/{id}/cities; 422 на нечисловой id). Config: только DSN (app→PgBouncer, migrate→Postgres напрямую, ADR-013). Миграции при старте через pkg/shared/migrate. Dockerfile build-local go.work → distroless nonroot, healthcheck /location -health. Compose: сервис location + dev-порт 8082 + scrape-job prometheus. Тесты: unit (config DSN, transport regions/cities/404/422/not-found) + integration на testcontainers postgres (14 регионов, 56 городов, 12 районов Ташкента, апостроф Farg'ona, RegionExists, пустой список для чужого региона) — go test -tags=integration PASS (6.7s); golangci-lint 0 issues (default+integration). Живая проверка (15 контейнеров): миграции applied=2, рестарт→applied=0 (идемпотентно); /readyz ready; напрямую и через gateway (routing /api/v1/locations→location): 14 регионов (первый — г.Ташкент), 12 районов Ташкента, апостроф Farg'ona корректен, Самарканд/Каттакурган/Ургут; 404 неизвестный регион, 422 нечисловой id; Prometheus up{job=location}=1"
 
 next_actions:
-  - "Stage 3.1 (Media): media-сервис — POST /media (multipart), валидация (тип/размер/лимит на объявление), сохранение оригинала в MinIO, таблица media"
-  - "Stage 3.2: воркер обработки медиа — превью 120/480/1080, удаление EXIF, presigned/CDN URL, очистка сирот по TTL (задачи через NATS)"
-  - "Stage 3.3: listing-сервис — таблицы ads, ad_attribute_values (валидация против Catalog), ad_images, outbox"
+  - "Stage 3.2: воркер обработки медиа — превью 120/480/1080, удаление EXIF, presigned/CDN URL, очистка сирот по TTL (задачи через NATS, консьюмер bozor.media.uploaded → bozor.media.processed)"
+  - "Stage 3.3: listing-сервис — таблицы ads, ad_attribute_values (валидация против Catalog), ad_images (финализация привязки media→объявление), outbox"
 
 decisions:                         # краткие ссылки; полные ADR — в DECISIONS.md
   - decision: "Брокер — NATS JetStream (не Kafka) ради лёгкости на Compose"
@@ -132,6 +115,10 @@ decisions:                         # краткие ссылки; полные A
     rationale: "Junction category_attributes без копий — единственный источник истины; изменение на разделе сразу видно потомкам; self-join по path вместо рекурсии/денормализации; кеш эффективного набора — в 2.4"
     date: "2026-07-08"
     alternatives: ["Рекурсивный CTE по parent_id", "Денормализация унаследованных атрибутов", "Разрешение в коде приложения"]
+  - decision: "Media: оригиналы в MinIO по object_key, метаданные в БД, тип по содержимому, ad_id без кросс-БД FK (ADR-017)"
+    rationale: "Объектное хранилище масштабируется отдельно от БД; sniffing http.DetectContentType не даёт подделать тип; связь с объявлением финализируется в ad_images (3.3), db-per-service сохранён; запись+событие в одной outbox-tx, компенсация при сбое"
+    date: "2026-07-09"
+    alternatives: ["bytea в БД", "доверять Content-Type клиента", "FK ad_id на таблицу ads"]
 
 open_questions: []
 
@@ -148,10 +135,10 @@ tech_stack:
   deploy: ["Docker Compose", "nginx"]
 
 metrics:
-  completed_stages: 15
+  completed_stages: 16
   total_stages: 52
-  completion_percentage: 29
-  estimated_remaining_stages: 37
-  chapters_completed: ["0", "1", "2"]   # CHAPTER 0 (Foundations), 1 (Auth & Identity), 2 (Catalog & Location) завершены
+  completion_percentage: 31
+  estimated_remaining_stages: 36
+  chapters_completed: ["0", "1", "2"]   # CHAPTER 0, 1, 2 завершены; CHAPTER 3 (Listings & Media) начат — Stage 3.1 (Media upload) готов
 
 notes: "Backend-only, фронтенда нет. Целевая нагрузка: десятки тысяч DAU. Автономный режим работы подтверждён заказчиком. Коммиты — от имени baxromsafarov. Окружение: Windows 11, Go 1.26.4, Docker Desktop 29.2.1 + Compose v5, golangci-lint 2.12.2, goose, buf. Нюанс: локально go test без -race (нет cgo на Windows); -race выполняется в CI на Ubuntu. goconst min-occurrences=5. Инфра-нюансы (Stage 0.3): postgres:18 монтирует /var/lib/postgresql (не .../data); healthcheck typesense — через bash /dev/tcp (нет curl/wget/nc в образе). Локальный .env создаётся из .env.example (gitignore)."
