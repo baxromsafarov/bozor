@@ -3,6 +3,9 @@ package transport
 import (
 	"net/http"
 
+	"github.com/go-chi/chi/v5"
+
+	"bozor/pkg/shared/apperr"
 	"bozor/pkg/shared/authx"
 	"bozor/pkg/shared/httpx"
 
@@ -51,6 +54,24 @@ func (h *Handler) PutPrefs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	prefs, err := h.svc.SetNotificationPrefs(r.Context(), owner, toPrefs(req.Prefs))
+	if err != nil {
+		h.writeError(w, r, err)
+		return
+	}
+	httpx.Respond(w, http.StatusOK, toPrefsResponse(prefs))
+}
+
+// InternalPrefs отдаёт эффективные настройки уведомлений пользователя по id для
+// внутренних потребителей (Notification-сервис). Без авторизации: эндпоинт
+// доступен только во внутренней сети compose (как /internal/ads Listing).
+func (h *Handler) InternalPrefs(w http.ResponseWriter, r *http.Request) {
+	userID := chi.URLParam(r, "id")
+	if userID == "" {
+		httpx.WriteProblem(w, r, apperr.New(apperr.KindInvalid, "invalid_user_id",
+			"Некорректный идентификатор пользователя", "Foydalanuvchi identifikatori noto'g'ri"))
+		return
+	}
+	prefs, err := h.svc.NotificationPrefs(r.Context(), userID)
 	if err != nil {
 		h.writeError(w, r, err)
 		return

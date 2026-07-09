@@ -49,6 +49,9 @@ services:
   favorites-savedsearch:
     ports:
       - "127.0.0.1:8088:8080"   # прямой доступ к favorites-savedsearch (dev)
+  notification:
+    ports:
+      - "127.0.0.1:8089:8080"   # прямой доступ к notification (dev)
   grafana:
     ports:
       - "127.0.0.1:3000:3000"   # UI Grafana

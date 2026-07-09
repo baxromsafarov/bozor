@@ -12,9 +12,9 @@ import (
 	"bozor/pkg/shared/otelx"
 )
 
-const serviceName = "user-profile"
+const serviceName = "notification"
 
-// Deps — зависимости для сборки роутера User/Profile-сервиса.
+// Deps — зависимости для сборки роутера Notification-сервиса.
 type Deps struct {
 	Log            *slog.Logger
 	Handler        *Handler
@@ -22,7 +22,7 @@ type Deps struct {
 	MetricsHandler http.Handler
 }
 
-// NewRouter собирает HTTP-роутер User/Profile-сервиса.
+// NewRouter собирает HTTP-роутер Notification-сервиса.
 func NewRouter(d Deps) http.Handler {
 	r := chi.NewRouter()
 
@@ -40,19 +40,9 @@ func NewRouter(d Deps) http.Handler {
 
 	r.Group(func(api chi.Router) {
 		api.Use(authx.FromForwardedHeaders)
-
-		// Свой профиль и настройки — только владелец (из идентичности).
-		api.Get("/api/v1/me", d.Handler.Me)
-		api.Patch("/api/v1/me", d.Handler.UpdateMe)
-		api.Get("/api/v1/me/notification-prefs", d.Handler.GetPrefs)
-		api.Put("/api/v1/me/notification-prefs", d.Handler.PutPrefs)
-		// Публичный профиль продавца.
-		api.Get("/api/v1/users/{id}", d.Handler.PublicProfile)
+		// История уведомлений владельца (статусы доставки).
+		api.Get("/api/v1/notifications", d.Handler.List)
 	})
-
-	// Внутренний эндпоинт (без авторизации, только внутренняя сеть): настройки
-	// уведомлений пользователя для Notification-сервиса (fetch-current-state).
-	r.Get("/internal/users/{id}/notification-prefs", d.Handler.InternalPrefs)
 
 	notFound := func(w http.ResponseWriter, req *http.Request) {
 		httpx.WriteProblem(w, req, apperr.New(apperr.KindNotFound, "not_found",

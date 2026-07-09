@@ -9,6 +9,7 @@ use (
 	./services/listing
 	./services/location
 	./services/media
+	./services/notification
 	./services/search
 	./services/user-profile
 )
