@@ -20,6 +20,11 @@ type Config struct {
 	TypesenseURL string
 	// TypesenseAPIKey — ключ доступа к Typesense (обязателен).
 	TypesenseAPIKey string
+
+	// NATSURL — адрес NATS JetStream (потребление bozor.ad.* индексатором).
+	NATSURL string
+	// ListingInternalURL — базовый URL внутренних read-эндпоинтов Listing.
+	ListingInternalURL string
 }
 
 // Load читает конфигурацию из окружения (fail-fast на обязательных ключах).
@@ -28,11 +33,13 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("config: не заданы обязательные переменные: %s", strings.Join(missing, ", "))
 	}
 	return &Config{
-		Addr:            config.String("SEARCH_ADDR", defaultAddr),
-		Env:             config.String("APP_ENV", "dev"),
-		LogLevel:        config.String("LOG_LEVEL", "info"),
-		TypesenseURL:    typesenseURL(config.String("TYPESENSE_HOST", "typesense"), config.String("TYPESENSE_PORT", "8108")),
-		TypesenseAPIKey: config.String("TYPESENSE_API_KEY", ""),
+		Addr:               config.String("SEARCH_ADDR", defaultAddr),
+		Env:                config.String("APP_ENV", "dev"),
+		LogLevel:           config.String("LOG_LEVEL", "info"),
+		TypesenseURL:       typesenseURL(config.String("TYPESENSE_HOST", "typesense"), config.String("TYPESENSE_PORT", "8108")),
+		TypesenseAPIKey:    config.String("TYPESENSE_API_KEY", ""),
+		NATSURL:            config.String("NATS_URL", "nats://nats:4222"),
+		ListingInternalURL: config.String("LISTING_INTERNAL_URL", "http://listing-ads:8080"),
 	}, nil
 }
 

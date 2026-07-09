@@ -36,6 +36,7 @@ type fakeService struct {
 	gotStatus  string
 	gotLimit   int
 	gotOffset  int
+	gotAfter   string
 }
 
 func (f *fakeService) Create(_ context.Context, in app.CreateInput) (domain.Ad, error) {
@@ -86,6 +87,19 @@ func (f *fakeService) Feed(_ context.Context, filter domain.FeedFilter) ([]domai
 func (f *fakeService) MyAds(_ context.Context, userID, status string, limit, offset int) ([]domain.Ad, error) {
 	f.gotOwner, f.gotStatus = userID, status
 	f.gotLimit, f.gotOffset = limit, offset
+	return f.listResult, f.listErr
+}
+
+func (f *fakeService) ExportByID(_ context.Context, id string) (domain.Ad, error) {
+	f.gotAdID = id
+	if f.getErr != nil {
+		return domain.Ad{}, f.getErr
+	}
+	return f.getResult, nil
+}
+
+func (f *fakeService) ExportActive(_ context.Context, after string, limit int) ([]domain.Ad, error) {
+	f.gotAfter, f.gotLimit = after, limit
 	return f.listResult, f.listErr
 }
 
@@ -320,4 +334,39 @@ func TestMyAds_InvalidStatus(t *testing.T) {
 	rec := do(t, newRouter(svc), http.MethodGet, "/api/v1/me/ads?status=weird", "user-1", "")
 	assert.Equal(t, http.StatusUnprocessableEntity, rec.Code)
 	assert.Contains(t, rec.Body.String(), "invalid_status")
+}
+
+func TestExportGet_NoAuthNeeded(t *testing.T) {
+	svc := &fakeService{getResult: domain.Ad{
+		ID: "ad-1", Status: domain.StatusActive, Title: "T", CreatedAt: time.Unix(0, 0).UTC(),
+		Attributes: []domain.AdAttributeValue{{AttributeSlug: "brand", Value: "bmw"}},
+	}}
+	rec := do(t, newRouter(svc), http.MethodGet, "/internal/ads/ad-1", "", "")
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, "ad-1", svc.gotAdID)
+	var resp exportAd
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Equal(t, "active", resp.Status)
+	require.Len(t, resp.Attributes, 1)
+	assert.Equal(t, "bmw", resp.Attributes[0].Value)
+}
+
+func TestExportGet_NotFound(t *testing.T) {
+	svc := &fakeService{getErr: domain.ErrAdNotFound}
+	rec := do(t, newRouter(svc), http.MethodGet, "/internal/ads/nope", "", "")
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+}
+
+func TestExportList_Keyset(t *testing.T) {
+	svc := &fakeService{listResult: []domain.Ad{
+		{ID: "a1", Status: domain.StatusActive, CreatedAt: time.Unix(0, 0).UTC()},
+		{ID: "a2", Status: domain.StatusActive, CreatedAt: time.Unix(0, 0).UTC()},
+	}}
+	rec := do(t, newRouter(svc), http.MethodGet, "/internal/ads/export?after=a0&limit=2", "", "")
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, "a0", svc.gotAfter)
+	var resp exportListResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.Len(t, resp.Ads, 2)
+	assert.Equal(t, "a2", resp.NextAfter, "курсор — id последнего")
 }

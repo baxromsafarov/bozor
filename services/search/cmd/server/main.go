@@ -3,6 +3,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -13,34 +14,49 @@ import (
 	"syscall"
 	"time"
 
+	"bozor/pkg/shared/events"
 	"bozor/pkg/shared/httpx"
 	"bozor/pkg/shared/logging"
+	"bozor/pkg/shared/natsx"
 	"bozor/pkg/shared/otelx"
 
 	"bozor/services/search/internal/config"
+	"bozor/services/search/internal/indexer"
+	"bozor/services/search/internal/listingclient"
 	"bozor/services/search/internal/search"
 	"bozor/services/search/internal/transport"
 )
 
 const serviceName = "search"
 
-// typesenseTimeout — таймаут на запрос к Typesense.
-const typesenseTimeout = 5 * time.Second
+// Таймауты на запросы к зависимостям.
+const (
+	typesenseTimeout = 5 * time.Second
+	listingTimeout   = 5 * time.Second
+)
+
+// indexerSubjects — события Listing/Moderation/Promotions, по которым индексатор
+// пересобирает документ объявления (читая актуальное состояние из Listing).
+var indexerSubjects = []string{
+	events.SubjectAdCreated, events.SubjectAdUpdated, events.SubjectAdDeleted,
+	events.SubjectAdApproved, events.SubjectAdBumped, events.SubjectAdSold, events.SubjectAdExpired,
+}
 
 func main() {
 	healthcheck := flag.Bool("health", false, "выполнить self health-check по /healthz и выйти")
+	reindex := flag.Bool("reindex", false, "полная переиндексация активных объявлений и выход")
 	flag.Parse()
 
 	if *healthcheck {
 		os.Exit(runHealthCheck())
 	}
-	if err := run(); err != nil {
+	if err := run(*reindex); err != nil {
 		fmt.Fprintln(os.Stderr, "search:", err)
 		os.Exit(1)
 	}
 }
 
-func run() error {
+func run(reindex bool) error {
 	cfg, err := config.Load()
 	if err != nil {
 		return err
@@ -73,11 +89,45 @@ func run() error {
 	}
 	log.Info("коллекция ads готова", slog.Bool("created", created))
 
+	listing := listingclient.New(cfg.ListingInternalURL, listingTimeout)
+	idx := indexer.New(client, listing, log)
+
+	// Режим одноразовой переиндексации: перестроить индекс из экспорта и выйти.
+	if reindex {
+		n, err := idx.Reindex(ctx)
+		if err != nil {
+			return fmt.Errorf("переиндексация: %w", err)
+		}
+		log.Info("переиндексация выполнена", slog.Int("documents", n))
+		return nil
+	}
+
+	// NATS JetStream: консьюмер индексатора (bozor.ad.* → Typesense).
+	nc, js, err := natsx.Connect(cfg.NATSURL, serviceName)
+	if err != nil {
+		return fmt.Errorf("подключение к NATS: %w", err)
+	}
+	defer nc.Close()
+	if _, err := natsx.EnsureStream(ctx, js, events.StreamName, []string{events.SubjectsWildcard}); err != nil {
+		return fmt.Errorf("создание стрима: %w", err)
+	}
+	cc, err := natsx.Consume(ctx, js, events.StreamName, indexer.Consumer, indexerSubjects, 5, idx.Handle)
+	if err != nil {
+		return fmt.Errorf("консьюмер индексатора: %w", err)
+	}
+	defer cc.Stop()
+
 	router := transport.NewRouter(transport.Deps{
 		Log:            log,
 		MetricsHandler: metricsHandler,
 		ReadyChecks: map[string]httpx.Check{
 			"typesense": client.Health,
+			"nats": func(context.Context) error {
+				if !nc.IsConnected() {
+					return errors.New("nats: нет соединения")
+				}
+				return nil
+			},
 		},
 	})
 

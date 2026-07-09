@@ -56,6 +56,11 @@ func NewRouter(d Deps) http.Handler {
 		api.Get("/api/v1/ads/{id}", d.Handler.Get)
 	})
 
+	// Внутренние read-эндпоинты для синхронизации read-модели Search (Stage 4.2):
+	// не под /api/v1 (gateway их не проксирует наружу — только внутренняя сеть).
+	r.Get("/internal/ads/export", d.Handler.ExportList)
+	r.Get("/internal/ads/{id}", d.Handler.ExportGet)
+
 	notFound := func(w http.ResponseWriter, req *http.Request) {
 		httpx.WriteProblem(w, req, apperr.New(apperr.KindNotFound, "not_found",
 			"Ресурс не найден", "Resurs topilmadi"))

@@ -36,6 +36,8 @@ type Service interface {
 	MarkSold(ctx context.Context, adID, userID string) (domain.Ad, error)
 	Renew(ctx context.Context, adID, userID string) (domain.Ad, error)
 	Archive(ctx context.Context, adID, userID string) (domain.Ad, error)
+	ExportByID(ctx context.Context, id string) (domain.Ad, error)
+	ExportActive(ctx context.Context, after string, limit int) ([]domain.Ad, error)
 }
 
 // Handler обслуживает эндпоинты объявлений.

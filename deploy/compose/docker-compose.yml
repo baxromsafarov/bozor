@@ -468,9 +468,13 @@ services:
       TYPESENSE_HOST: ${TYPESENSE_HOST}
       TYPESENSE_PORT: ${TYPESENSE_PORT}
       TYPESENSE_API_KEY: ${TYPESENSE_API_KEY}
+      NATS_URL: ${NATS_URL}                     # потребление bozor.ad.* индексатором
+      LISTING_INTERNAL_URL: http://listing-ads:8080  # чтение актуального состояния объявлений
       OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT}
     depends_on:
       typesense:
+        condition: service_healthy
+      nats:
         condition: service_healthy
       tempo:
         condition: service_started

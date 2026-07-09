@@ -21,17 +21,19 @@ func ptr[T any](v T) *T { return &v }
 func discardLogger() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
 
 type fakeStore struct {
-	created    *domain.Ad
-	events     []events.Envelope
-	getResult  *domain.Ad // если задан — возвращается GetByID (для действий жизненного цикла)
-	getErr     error
-	lastUpd    domain.StatusUpdate // последний переход, переданный в TransitionWithEvent
-	transErr   error
-	updated    *domain.Ad        // последнее объявление, переданное в UpdateWithEvent
-	deletedID  string            // id из DeleteWithEvent
-	list       []domain.Ad       // результат ListActive/ListByUser
-	feedFilter domain.FeedFilter // фильтр из ListActive
-	byUser     [4]string         // {userID, status, limit, offset} из ListByUser
+	created     *domain.Ad
+	events      []events.Envelope
+	getResult   *domain.Ad // если задан — возвращается GetByID (для действий жизненного цикла)
+	getErr      error
+	lastUpd     domain.StatusUpdate // последний переход, переданный в TransitionWithEvent
+	transErr    error
+	updated     *domain.Ad        // последнее объявление, переданное в UpdateWithEvent
+	deletedID   string            // id из DeleteWithEvent
+	list        []domain.Ad       // результат ListActive/ListByUser
+	feedFilter  domain.FeedFilter // фильтр из ListActive
+	byUser      [4]string         // {userID, status, limit, offset} из ListByUser
+	exportAfter string            // after из ListActiveFull
+	exportLimit int               // limit из ListActiveFull
 }
 
 func (f *fakeStore) CreateWithEvent(_ context.Context, a domain.Ad, ev events.Envelope) error {
@@ -80,6 +82,11 @@ func (f *fakeStore) ListActive(_ context.Context, filter domain.FeedFilter) ([]d
 
 func (f *fakeStore) ListByUser(_ context.Context, userID, status string, limit, offset int) ([]domain.Ad, error) {
 	f.byUser = [4]string{userID, status, itoa(limit), itoa(offset)}
+	return f.list, nil
+}
+
+func (f *fakeStore) ListActiveFull(_ context.Context, after string, limit int) ([]domain.Ad, error) {
+	f.exportAfter, f.exportLimit = after, limit
 	return f.list, nil
 }
 

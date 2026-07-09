@@ -103,6 +103,32 @@ func (c *Client) createCollection(ctx context.Context, schema CollectionSchema) 
 	return nil
 }
 
+// UpsertDocument вставляет/обновляет документ коллекции по его id (поле "id"
+// внутри doc). Идемпотентно: повторный upsert перезаписывает документ.
+func (c *Client) UpsertDocument(ctx context.Context, collection string, doc any) error {
+	status, body, err := c.do(ctx, http.MethodPost, "/collections/"+collection+"/documents?action=upsert", doc)
+	if err != nil {
+		return err
+	}
+	if status != http.StatusOK && status != http.StatusCreated {
+		return fmt.Errorf("typesense: upsert в %q status %d: %s", collection, status, body)
+	}
+	return nil
+}
+
+// DeleteDocument удаляет документ по id. Идемпотентно: отсутствие документа (404)
+// считается успехом.
+func (c *Client) DeleteDocument(ctx context.Context, collection, id string) error {
+	status, body, err := c.do(ctx, http.MethodDelete, "/collections/"+collection+"/documents/"+id, nil)
+	if err != nil {
+		return err
+	}
+	if status != http.StatusOK && status != http.StatusNotFound {
+		return fmt.Errorf("typesense: удаление документа %q status %d: %s", id, status, body)
+	}
+	return nil
+}
+
 // do выполняет HTTP-запрос к Typesense, сериализуя body в JSON (если не nil),
 // и возвращает статус и тело ответа.
 func (c *Client) do(ctx context.Context, method, path string, body any) (int, []byte, error) {

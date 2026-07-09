@@ -252,6 +252,21 @@ func TestListingRepo_ListActiveAndByUser(t *testing.T) {
 	drafts, err := r.ListByUser(ctx, user, string(domain.StatusDraft), 10, 0)
 	require.NoError(t, err)
 	assert.Len(t, drafts, 1)
+
+	// Полный экспорт активных (с детьми, keyset по id): два, с атрибутами/изображениями.
+	full, err := r.ListActiveFull(ctx, "", 10)
+	require.NoError(t, err)
+	require.Len(t, full, 2)
+	for _, a := range full {
+		assert.Equal(t, domain.StatusActive, a.Status)
+		assert.NotEmpty(t, a.Attributes, "экспорт несёт атрибуты")
+		assert.NotEmpty(t, a.Images, "экспорт несёт изображения")
+	}
+	// Keyset: after = id первого → возвращается только второй.
+	page2, err := r.ListActiveFull(ctx, full[0].ID, 10)
+	require.NoError(t, err)
+	require.Len(t, page2, 1)
+	assert.Equal(t, full[1].ID, page2[0].ID)
 }
 
 func TestListingRepo_AddViews(t *testing.T) {

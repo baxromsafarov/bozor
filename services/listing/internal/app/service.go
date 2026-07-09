@@ -32,6 +32,7 @@ type Store interface {
 	DeleteWithEvent(ctx context.Context, adID string, ev events.Envelope) error
 	ListActive(ctx context.Context, f domain.FeedFilter) ([]domain.Ad, error)
 	ListByUser(ctx context.Context, userID, status string, limit, offset int) ([]domain.Ad, error)
+	ListActiveFull(ctx context.Context, after string, limit int) ([]domain.Ad, error)
 }
 
 // Ограничения пагинации ленты и списка «мои объявления».
@@ -301,6 +302,19 @@ func (s *Service) Feed(ctx context.Context, f domain.FeedFilter) ([]domain.Ad, e
 func (s *Service) MyAds(ctx context.Context, userID, status string, limit, offset int) ([]domain.Ad, error) {
 	limit, offset = clampPage(limit, offset)
 	return s.store.ListByUser(ctx, userID, status, limit, offset)
+}
+
+// ExportByID возвращает полное объявление по id БЕЗ учёта просмотра — для
+// внутренней синхронизации read-модели Search (Stage 4.2).
+func (s *Service) ExportByID(ctx context.Context, id string) (domain.Ad, error) {
+	return s.store.GetByID(ctx, id)
+}
+
+// ExportActive возвращает активные объявления с полными данными (keyset по id) —
+// источник для полной переиндексации Search.
+func (s *Service) ExportActive(ctx context.Context, after string, limit int) ([]domain.Ad, error) {
+	limit, _ = clampPage(limit, 0)
+	return s.store.ListActiveFull(ctx, after, limit)
 }
 
 // clampPage приводит лимит/смещение к безопасным границам.

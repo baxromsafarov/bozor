@@ -323,6 +323,37 @@ func (r *Repo) ListByUser(ctx context.Context, userID, status string, limit, off
 	return r.queryAds(ctx, sql, args...)
 }
 
+// ListActiveFull возвращает активные объявления со значениями атрибутов и
+// изображениями, постранично keyset-пагинацией по id (id > after) — источник
+// полной проекции для переиндексации Search (Stage 4.2). Дочерние сущности
+// подгружаются на каждое объявление (переиндексация нечастая).
+func (r *Repo) ListActiveFull(ctx context.Context, after string, limit int) ([]domain.Ad, error) {
+	sql := `SELECT ` + adColumns + ` FROM ads WHERE status = 'active'`
+	args := []any{}
+	n := 1
+	if after != "" {
+		sql += fmt.Sprintf(" AND id > $%d::uuid", n)
+		args = append(args, after)
+		n++
+	}
+	sql += fmt.Sprintf(" ORDER BY id LIMIT $%d", n)
+	args = append(args, limit)
+
+	ads, err := r.queryAds(ctx, sql, args...)
+	if err != nil {
+		return nil, err
+	}
+	for i := range ads {
+		if ads[i].Attributes, err = r.attributes(ctx, ads[i].ID); err != nil {
+			return nil, err
+		}
+		if ads[i].Images, err = r.images(ctx, ads[i].ID); err != nil {
+			return nil, err
+		}
+	}
+	return ads, nil
+}
+
 // queryAds выполняет запрос списка объявлений (без дочерних сущностей).
 func (r *Repo) queryAds(ctx context.Context, sql string, args ...any) ([]domain.Ad, error) {
 	rows, err := r.pool.Query(ctx, sql, args...)

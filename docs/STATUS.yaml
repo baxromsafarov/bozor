@@ -1,13 +1,17 @@
-status_id: "20260709-153000"
+status_id: "20260709-154700"
 project: "Bozor"
 version: "1.0"
 
 current:
   chapter: "4"                     # CHAPTER 4: Search
-  stage: "4.2"                     # STAGE 4.2: индексатор на событиях (bozor.ad.* → Typesense) + reindex
+  stage: "4.3"                     # STAGE 4.3: API поиска (GET /ads/search + facets)
   status: "not_started"
 
 completed:
+  - stage_id: "4.2"
+    title: "Search: индексатор на событиях (bozor.ad.* → Typesense) + reindex — событие как триггер, чтение истины из Listing"
+    completed_date: "2026-07-09"
+    evidence: "Индексатор read-модели (ADR-024): событие — триггер, актуальное состояние читается из Listing (источник истины), документ Typesense сводится к нему (upsert active / delete иначе) — устойчиво к переупорядочиванию, идемпотентно по id документа (без БД/inbox у Search). Search: listingclient (HTTP: GetAd→404=удалено, ListActive keyset по id), indexer.Indexer (Handle: разбор ad_id→sync; sync: GetAd, !found||status!=active→DeleteDocument, active→buildDoc+UpsertDocument; Reindex: постранично export→upsert, лог count), buildDoc (title/description/category_id/region_id/city_id/price/currency/status/attrs map[slug]value/created_at unix из RFC3339/bumped_at/is_top/location[lat,lng]), search.Client += UpsertDocument (POST ?action=upsert)/DeleteDocument (404=ok). main: консьюмер search-indexer (durable, natsx.Consume, maxDeliver=5→DLQ) на bozor.ad.created|updated|deleted|approved|bumped|sold|expired; флаг -reindex (одноразовая переиндексация и выход); readyz += nats. config: NATS_URL, LISTING_INTERNAL_URL. Listing: repo.ListActiveFull (active, keyset id>after, с детьми), app.ExportByID/ExportActive, transport внутренние GET /internal/ads/{id} и /internal/ads/export (DTO exportAd — полная проекция + bumped_at, БЕЗ учёта просмотра; не под /api/v1 → gateway не проксирует). Тесты: unit search (Upsert/Delete через httptest — 200/201/404-idempotent) + indexer (Handle active→upsert с attrs/гео/created_at unix; sold→delete; not-found→delete; пустой ad_id→ошибка; Reindex постранично 3 док) + listing app/transport (ExportByID/ExportActive, /internal/ads 200/404, export keyset next_after) + integration listing repo (ListActiveFull с детьми + keyset) — go test PASS (default + integration repo 27s); golangci-lint 0 issues (search+listing, default+integration); gofmt чисто; go work sync — все 8 модулей зелёные. Живая проверка (search+listing healthy, консьюмер search-indexer на стриме BOZOR): создание+submit+approve объявления (Prado, region 5, brand=toyota/year=2021) → индексатор потребил bozor.ad.updated(active)→GET /internal/ads/{id}→upsert; документ в Typesense со всеми полями (attrs.brand/year, region_id=5, price=777, is_top=false, created_at unix); полнотекст q=prado&query_by=title → found=1 с highlight matched_tokens=[Prado] (typo/токенизация); POST /sold → индексатор потребил bozor.ad.sold→GET показал status sold→DeleteDocument (num_documents 4→3, GET документа 404); reindex: active в БД=3, очистка индекса filter price>=0 (num_deleted=3→0), затем search -reindex (docker compose run) → лог 'переиндексация выполнена documents=3', num_documents 0→3 (восстановление с нуля постранично из /internal/ads/export)"
   - stage_id: "4.1"
     title: "Search-сервис + схема коллекции Typesense (ads: полнотекст/фасеты/сортировки/гео) — тонкий HTTP-клиент"
     completed_date: "2026-07-09"
@@ -99,9 +103,9 @@ completed:
     evidence: "services/location (модуль bozor/services/location в go.work). Миграции: 00001 схема (regions: id smallint PK, slug UNIQUE, name_uz/name_ru, lat/lon, sort_order; cities: id PK, region_id FK ON DELETE CASCADE, slug UNIQUE, имена/гео/sort, индекс по region_id,sort_order) + 00002 идемпотентный сид (ADR-007, ON CONFLICT DO UPDATE): 14 первичных регионов (12 областей + г.Ташкент + Респ. Каракалпакстан) и 56 городов/районов с реальными координатами WGS84 — включая 12 районов Ташкента и по 2–4 города на регион (апострофы в узбекских названиях экранированы: Farg'ona, Qo'qon, Qoraqalpog'iston и т.д.). Слой: domain (Region/City, lat/lon *float64, ErrRegionNotFound), repo (Regions/CitiesByRegion/RegionExists через pgx, ORDER BY sort_order), app (Service; Cities → 404 при несуществующем регионе, пустой список = регион без городов), transport (chi + middleware pkg/shared, GET /api/v1/locations/regions, GET /api/v1/locations/regions/{id}/cities; 422 на нечисловой id). Config: только DSN (app→PgBouncer, migrate→Postgres напрямую, ADR-013). Миграции при старте через pkg/shared/migrate. Dockerfile build-local go.work → distroless nonroot, healthcheck /location -health. Compose: сервис location + dev-порт 8082 + scrape-job prometheus. Тесты: unit (config DSN, transport regions/cities/404/422/not-found) + integration на testcontainers postgres (14 регионов, 56 городов, 12 районов Ташкента, апостроф Farg'ona, RegionExists, пустой список для чужого региона) — go test -tags=integration PASS (6.7s); golangci-lint 0 issues (default+integration). Живая проверка (15 контейнеров): миграции applied=2, рестарт→applied=0 (идемпотентно); /readyz ready; напрямую и через gateway (routing /api/v1/locations→location): 14 регионов (первый — г.Ташкент), 12 районов Ташкента, апостроф Farg'ona корректен, Самарканд/Каттакурган/Ургут; 404 неизвестный регион, 422 нечисловой id; Prometheus up{job=location}=1"
 
 next_actions:
-  - "Stage 4.2: индексатор на событиях — потребитель bozor.ad.created|updated|deleted|approved|bumped|sold|expired (consumer→Typesense upsert/delete), идемпотентность, DLQ, инструмент полной переиндексации (reindex)"
-  - "Stage 4.3: API поиска — GET /ads/search (полнотекст uz/ru, typo, фильтры/фасеты, сортировки, пагинация, гео) + GET /ads/search/facets; развести маршрут /api/v1/ads/search от Listing в gateway"
+  - "Stage 4.3: API поиска — GET /ads/search (полнотекст uz/ru, typo, фильтры category/region/city/price/attrs-фасеты, сортировки relevance/price/date, пагинация, гео) + GET /ads/search/facets; развести маршрут /api/v1/ads/search от Listing в gateway (более специфичный upstream)"
   - "Stage 4.4: заглушка топ-блока featured/TOP в выдаче до Promotions (CHAPTER 8)"
+  - "CHAPTER 5 (Profiles/Favorites/SavedSearches): 5.1 User/Profile-сервис"
 
 decisions:                         # краткие ссылки; полные ADR — в DECISIONS.md
   - decision: "Брокер — NATS JetStream (не Kafka) ради лёгкости на Compose"
@@ -168,6 +172,10 @@ decisions:                         # краткие ссылки; полные A
     rationale: "Typesense REST прост/стабилен — узкий набор операций (health/collection/index/search) реализуем сами без крупной зависимости с чужой версионностью; полный контроль ошибок/таймаутов, тесты через httptest; схема ads с nested attrs для фасетов, одно поле title/description (пользовательский текст, двуязычие токенизацией)"
     date: "2026-07-09"
     alternatives: ["Официальный typesense-go", "PostgreSQL FTS"]
+  - decision: "Индексатор Search — событие как триггер + чтение актуального состояния из Listing, реконсиляция Typesense, reindex через внутренний экспорт (ADR-024)"
+    rationale: "Минимальные события не несут описание/атрибуты/гео; читая истину из Listing на каждое событие, индекс сводится к текущему состоянию (устойчиво к переупорядочиванию), идемпотентно по id документа (без inbox); одна ветка построения документа для live и reindex; внутренний read Listing — HTTP (без учёта просмотра), отступление от gRPC-ADR-019 зафиксировано"
+    date: "2026-07-09"
+    alternatives: ["Обогатить события (event-carried state)", "Индексатор с БД/inbox", "gRPC Search→Listing"]
 
 open_questions: []
 
@@ -184,10 +192,10 @@ tech_stack:
   deploy: ["Docker Compose", "nginx"]
 
 metrics:
-  completed_stages: 22
+  completed_stages: 23
   total_stages: 52
-  completion_percentage: 42
-  estimated_remaining_stages: 30
-  chapters_completed: ["0", "1", "2", "3"]   # CHAPTER 0-3 завершены; CHAPTER 4 (Search) в работе — 4.1 (каркас+схема) готов
+  completion_percentage: 44
+  estimated_remaining_stages: 29
+  chapters_completed: ["0", "1", "2", "3"]   # CHAPTER 0-3 завершены; CHAPTER 4 (Search) в работе — 4.1 (каркас+схема) + 4.2 (индексатор+reindex) готовы
 
 notes: "Backend-only, фронтенда нет. Целевая нагрузка: десятки тысяч DAU. Автономный режим работы подтверждён заказчиком. Коммиты — от имени baxromsafarov. Окружение: Windows 11, Go 1.26.4, Docker Desktop 29.2.1 + Compose v5, golangci-lint 2.12.2, goose, buf. Нюанс: локально go test без -race (нет cgo на Windows); -race выполняется в CI на Ubuntu. goconst min-occurrences=5. Инфра-нюансы (Stage 0.3): postgres:18 монтирует /var/lib/postgresql (не .../data); healthcheck typesense — через bash /dev/tcp (нет curl/wget/nc в образе). Локальный .env создаётся из .env.example (gitignore)."
