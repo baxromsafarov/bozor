@@ -30,6 +30,7 @@ import (
 	"bozor/services/media/internal/repo"
 	"bozor/services/media/internal/storage"
 	"bozor/services/media/internal/transport"
+	"bozor/services/media/internal/worker"
 	"bozor/services/media/migrations"
 )
 
@@ -108,6 +109,8 @@ func run() error {
 		return fmt.Errorf("создание стрима: %w", err)
 	}
 
+	mediaRepo := repo.NewRepo(pool)
+
 	relay := &outbox.Relay{
 		Pool:    pool,
 		Publish: func(ctx context.Context, env events.Envelope) error { return natsx.Publish(ctx, js, env) },
@@ -123,8 +126,28 @@ func run() error {
 	}()
 	defer wg.Wait()
 
+	// Воркер обработки: потребляет bozor.media.uploaded, генерирует превью
+	// и снимает EXIF (Stage 3.2). До 3 попыток, затем DLQ (natsx).
+	processor := worker.NewProcessor(mediaRepo, blob, log)
+	cc, err := natsx.Consume(ctx, js, events.StreamName, worker.Consumer,
+		[]string{events.SubjectMediaUploaded}, 3, processor.Handle)
+	if err != nil {
+		return fmt.Errorf("консьюмер обработки медиа: %w", err)
+	}
+	defer cc.Stop()
+
+	// Периодическая очистка сирот (медиа без объявления старше TTL).
+	cleaner := worker.NewCleaner(mediaRepo, blob, cfg.OrphanTTL, cfg.CleanInterval, cfg.CleanBatchSize, log)
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		if err := cleaner.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
+			log.Error("очистка сирот остановлена с ошибкой", slog.String("error", err.Error()))
+		}
+	}()
+
 	limits := domain.Limits{MaxSizeBytes: cfg.MaxSizeBytes, MaxPerAd: cfg.MaxPerAd}
-	svc := app.NewService(repo.NewRepo(pool), blob, limits, log)
+	svc := app.NewService(mediaRepo, blob, limits, cfg.PresignTTL, log)
 	handler := transport.NewHandler(svc, cfg.MaxSizeBytes, log)
 
 	router := transport.NewRouter(transport.Deps{

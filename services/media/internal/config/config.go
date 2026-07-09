@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/url"
 	"strings"
+	"time"
 
 	"bozor/pkg/shared/config"
 )
@@ -18,6 +19,14 @@ const defaultAddr = ":8080"
 const (
 	defaultMaxSizeBytes = 10 << 20 // 10 MiB на файл
 	defaultMaxPerAd     = 10       // максимум изображений на объявление
+)
+
+// Значения по умолчанию для обработки и очистки медиа (Stage 3.2).
+const (
+	defaultOrphanTTL      = 24 * time.Hour   // возраст непривязанного медиа до очистки
+	defaultCleanInterval  = 15 * time.Minute // период запуска очистки сирот
+	defaultPresignTTL     = 15 * time.Minute // срок жизни presigned-ссылки на оригинал
+	defaultCleanBatchSize = 100              // сколько сирот удалять за один проход
 )
 
 // Config — конфигурация Media-сервиса.
@@ -45,6 +54,12 @@ type Config struct {
 	// Лимиты загрузки.
 	MaxSizeBytes int64
 	MaxPerAd     int
+
+	// Обработка и очистка медиа (Stage 3.2).
+	OrphanTTL      time.Duration // непривязанное медиа старше TTL считается сиротой
+	CleanInterval  time.Duration // период запуска очистки сирот
+	CleanBatchSize int           // размер пакета очистки за один проход
+	PresignTTL     time.Duration // срок жизни presigned-ссылки на оригинал
 }
 
 // Load читает конфигурацию из окружения (fail-fast на обязательных ключах).
@@ -76,6 +91,10 @@ func Load() (*Config, error) {
 		PublicBaseURL:  strings.TrimRight(config.String("MEDIA_PUBLIC_BASE_URL", "http://localhost:9000/bozor-media"), "/"),
 		MaxSizeBytes:   int64(config.Int("MEDIA_MAX_SIZE_BYTES", defaultMaxSizeBytes)),
 		MaxPerAd:       config.Int("MEDIA_MAX_PER_AD", defaultMaxPerAd),
+		OrphanTTL:      config.Duration("MEDIA_ORPHAN_TTL", defaultOrphanTTL),
+		CleanInterval:  config.Duration("MEDIA_CLEAN_INTERVAL", defaultCleanInterval),
+		CleanBatchSize: config.Int("MEDIA_CLEAN_BATCH_SIZE", defaultCleanBatchSize),
+		PresignTTL:     config.Duration("MEDIA_PRESIGN_TTL", defaultPresignTTL),
 	}, nil
 }
 

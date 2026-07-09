@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -70,8 +71,12 @@ func (f *fakeBlob) Remove(_ context.Context, key string) error {
 
 func (f *fakeBlob) PublicURL(key string) string { return "http://cdn/bozor-media/" + key }
 
+func (f *fakeBlob) PresignedURL(_ context.Context, key string, _ time.Duration) (string, error) {
+	return "http://cdn/bozor-media/" + key + "?signed=1", nil
+}
+
 func newSvc(store *fakeStore, blob *fakeBlob) *Service {
-	return NewService(store, blob, domain.Limits{MaxSizeBytes: 1000, MaxPerAd: 3}, discardLogger())
+	return NewService(store, blob, domain.Limits{MaxSizeBytes: 1000, MaxPerAd: 3}, time.Minute, discardLogger())
 }
 
 func pngData(n int) []byte {
@@ -147,15 +152,36 @@ func TestUpload_CompensatesOnInsertFailure(t *testing.T) {
 
 func TestGet_NotFound(t *testing.T) {
 	_, err := newSvc(&fakeStore{getByID: map[string]domain.Media{}}, &fakeBlob{}).
-		Get(context.Background(), "nope")
+		Get(context.Background(), "nope", "")
 	assert.ErrorIs(t, err, domain.ErrMediaNotFound)
 }
 
-func TestGet_ReturnsPublicURL(t *testing.T) {
+func TestGet_ReturnsPublicURLAndPreviews(t *testing.T) {
 	store := &fakeStore{getByID: map[string]domain.Media{
-		"m1": {ID: "m1", ObjectKey: "originals/m1.png", Status: domain.StatusUploaded},
+		"m1": {ID: "m1", OwnerUserID: "owner-1", ObjectKey: "originals/m1.jpg", Status: domain.StatusReady,
+			Previews: []domain.Preview{{Size: 120, Width: 120, Height: 90, ObjectKey: "previews/m1/120.jpg"}}},
 	}}
-	up, err := newSvc(store, &fakeBlob{}).Get(context.Background(), "m1")
+	// Аноним (пустой requester) не получает presigned-ссылку на оригинал.
+	up, err := newSvc(store, &fakeBlob{}).Get(context.Background(), "m1", "")
 	require.NoError(t, err)
-	assert.Equal(t, "http://cdn/bozor-media/originals/m1.png", up.PublicURL)
+	assert.Equal(t, "http://cdn/bozor-media/originals/m1.jpg", up.PublicURL)
+	assert.Empty(t, up.OriginalURL, "аноним не получает presigned-оригинал")
+	require.Len(t, up.Previews, 1)
+	assert.Equal(t, 120, up.Previews[0].Size)
+	assert.Equal(t, "http://cdn/bozor-media/previews/m1/120.jpg", up.Previews[0].URL)
+}
+
+func TestGet_OwnerReceivesPresignedOriginal(t *testing.T) {
+	store := &fakeStore{getByID: map[string]domain.Media{
+		"m1": {ID: "m1", OwnerUserID: "owner-1", ObjectKey: "originals/m1.jpg", Status: domain.StatusReady},
+	}}
+	up, err := newSvc(store, &fakeBlob{}).Get(context.Background(), "m1", "owner-1")
+	require.NoError(t, err)
+	assert.Equal(t, "http://cdn/bozor-media/originals/m1.jpg?signed=1", up.OriginalURL,
+		"владельцу выдаётся presigned-ссылка на оригинал")
+
+	// Чужой пользователь presigned-ссылку не получает.
+	up2, err := newSvc(store, &fakeBlob{}).Get(context.Background(), "m1", "someone-else")
+	require.NoError(t, err)
+	assert.Empty(t, up2.OriginalURL)
 }

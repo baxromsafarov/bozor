@@ -5,6 +5,8 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net/url"
+	"time"
 
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
@@ -68,12 +70,36 @@ func (s *Store) Put(ctx context.Context, objectKey string, r io.Reader, size int
 	return nil
 }
 
+// Get читает объект из бакета целиком (для обработки воркером).
+func (s *Store) Get(ctx context.Context, objectKey string) ([]byte, error) {
+	obj, err := s.client.GetObject(ctx, s.bucket, objectKey, minio.GetObjectOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("storage: получение объекта: %w", err)
+	}
+	defer func() { _ = obj.Close() }()
+	data, err := io.ReadAll(obj)
+	if err != nil {
+		return nil, fmt.Errorf("storage: чтение объекта: %w", err)
+	}
+	return data, nil
+}
+
 // Remove удаляет объект из бакета (для отката/очистки).
 func (s *Store) Remove(ctx context.Context, objectKey string) error {
 	if err := s.client.RemoveObject(ctx, s.bucket, objectKey, minio.RemoveObjectOptions{}); err != nil {
 		return fmt.Errorf("storage: удаление объекта: %w", err)
 	}
 	return nil
+}
+
+// PresignedURL возвращает временную (presigned) ссылку GET на объект со сроком
+// жизни ttl. Используется для доступа владельца к оригиналу (превью — публично).
+func (s *Store) PresignedURL(ctx context.Context, objectKey string, ttl time.Duration) (string, error) {
+	u, err := s.client.PresignedGetObject(ctx, s.bucket, objectKey, ttl, url.Values{})
+	if err != nil {
+		return "", fmt.Errorf("storage: presigned-ссылка: %w", err)
+	}
+	return u.String(), nil
 }
 
 // PublicURL возвращает публичный URL объекта (бакет отдаётся download-политикой).

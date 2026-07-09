@@ -64,6 +64,15 @@ func uploadedEvent(t *testing.T, mediaID string) events.Envelope {
 	return e
 }
 
+func mediaEvent(t *testing.T, subject, mediaID string) events.Envelope {
+	t.Helper()
+	e, err := events.New(subject, "media", map[string]any{"media_id": mediaID})
+	require.NoError(t, err)
+	return e
+}
+
+func ptrInt(v int) *int { return &v }
+
 func sampleMedia(t *testing.T, owner string, adID *string) domain.Media {
 	t.Helper()
 	id := newID(t)
@@ -149,4 +158,113 @@ func TestMediaRepo_DuplicateObjectKey_RollsBackEvent(t *testing.T) {
 
 	_, err = r.GetByID(ctx, dup.ID)
 	assert.ErrorIs(t, err, domain.ErrMediaNotFound)
+}
+
+func TestMediaRepo_MarkProcessed_ReadyEventInboxIdempotent(t *testing.T) {
+	ctx := context.Background()
+	pool := startDB(t)
+	r := repo.NewRepo(pool)
+	const consumer = "media-processor"
+
+	m := sampleMedia(t, newID(t), nil)
+	require.NoError(t, r.InsertWithEvent(ctx, m, uploadedEvent(t, m.ID)))
+
+	m.Width, m.Height = ptrInt(1600), ptrInt(900)
+	m.Previews = []domain.Preview{
+		{Size: 120, Width: 120, Height: 68, ObjectKey: domain.PreviewKey(m.ID, 120, "jpg")},
+		{Size: 480, Width: 480, Height: 270, ObjectKey: domain.PreviewKey(m.ID, 480, "jpg")},
+	}
+	evID := newID(t)
+	up := mediaEvent(t, events.SubjectMediaProcessed, m.ID)
+	up.ID = evID
+	require.NoError(t, r.MarkProcessedWithEvent(ctx, consumer, evID, m, up))
+
+	// Медиа переведено в ready с размерами и превью.
+	got, err := r.GetByID(ctx, m.ID)
+	require.NoError(t, err)
+	assert.Equal(t, domain.StatusReady, got.Status)
+	require.NotNil(t, got.Width)
+	assert.Equal(t, 1600, *got.Width)
+	require.NotNil(t, got.ProcessedAt)
+	require.Len(t, got.Previews, 2)
+	assert.Equal(t, 480, got.Previews[1].Size)
+	assert.Equal(t, domain.PreviewKey(m.ID, 120, "jpg"), got.Previews[0].ObjectKey)
+
+	// Событие processed в outbox (плюс uploaded от вставки = 2), inbox отметил событие.
+	assert.Equal(t, 2, outboxCount(t, pool))
+	done, err := r.IsEventProcessed(ctx, consumer, evID)
+	require.NoError(t, err)
+	assert.True(t, done)
+
+	// Повторная обработка того же события идемпотентна: статус ready, лишнего
+	// события не добавилось (переход только из uploaded).
+	require.NoError(t, r.MarkProcessedWithEvent(ctx, consumer, evID, m, mediaEvent(t, events.SubjectMediaProcessed, m.ID)))
+	assert.Equal(t, 2, outboxCount(t, pool), "повтор не плодит событие")
+}
+
+func TestMediaRepo_MarkEventProcessed(t *testing.T) {
+	ctx := context.Background()
+	pool := startDB(t)
+	r := repo.NewRepo(pool)
+	const consumer = "media-processor"
+
+	evID := newID(t)
+	done, err := r.IsEventProcessed(ctx, consumer, evID)
+	require.NoError(t, err)
+	assert.False(t, done)
+
+	require.NoError(t, r.MarkEventProcessed(ctx, consumer, evID))
+	require.NoError(t, r.MarkEventProcessed(ctx, consumer, evID)) // повтор безопасен
+
+	done, err = r.IsEventProcessed(ctx, consumer, evID)
+	require.NoError(t, err)
+	assert.True(t, done)
+}
+
+func TestMediaRepo_ListOrphans(t *testing.T) {
+	ctx := context.Background()
+	pool := startDB(t)
+	r := repo.NewRepo(pool)
+
+	cutoff := time.Now().UTC().Add(-24 * time.Hour)
+
+	// Старая сирота (ad_id NULL, создана до cutoff) — кандидат на очистку.
+	orphan := sampleMedia(t, newID(t), nil)
+	orphan.CreatedAt = cutoff.Add(-time.Hour)
+	require.NoError(t, r.InsertWithEvent(ctx, orphan, uploadedEvent(t, orphan.ID)))
+
+	// Старая, но привязанная к объявлению — НЕ сирота.
+	adID := newID(t)
+	attached := sampleMedia(t, newID(t), &adID)
+	attached.CreatedAt = cutoff.Add(-time.Hour)
+	require.NoError(t, r.InsertWithEvent(ctx, attached, uploadedEvent(t, attached.ID)))
+
+	// Свежая непривязанная — ещё не сирота (моложе cutoff).
+	fresh := sampleMedia(t, newID(t), nil)
+	require.NoError(t, r.InsertWithEvent(ctx, fresh, uploadedEvent(t, fresh.ID)))
+
+	orphans, err := r.ListOrphans(ctx, cutoff, 100)
+	require.NoError(t, err)
+	require.Len(t, orphans, 1, "только старое непривязанное медиа")
+	assert.Equal(t, orphan.ID, orphans[0].ID)
+}
+
+func TestMediaRepo_DeleteWithEvent(t *testing.T) {
+	ctx := context.Background()
+	pool := startDB(t)
+	r := repo.NewRepo(pool)
+
+	m := sampleMedia(t, newID(t), nil)
+	require.NoError(t, r.InsertWithEvent(ctx, m, uploadedEvent(t, m.ID)))
+
+	require.NoError(t, r.DeleteWithEvent(ctx, m.ID, mediaEvent(t, events.SubjectMediaDeleted, m.ID)))
+	_, err := r.GetByID(ctx, m.ID)
+	assert.ErrorIs(t, err, domain.ErrMediaNotFound)
+
+	// Повторное удаление — ErrMediaNotFound (строки уже нет).
+	err = r.DeleteWithEvent(ctx, m.ID, mediaEvent(t, events.SubjectMediaDeleted, m.ID))
+	assert.ErrorIs(t, err, domain.ErrMediaNotFound)
+
+	// outbox: uploaded + deleted = 2.
+	assert.Equal(t, 2, outboxCount(t, pool))
 }

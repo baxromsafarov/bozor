@@ -23,10 +23,11 @@ func discardLogger() *slog.Logger { return slog.New(slog.NewTextHandler(io.Disca
 
 // fakeService подменяет use-cases медиа.
 type fakeService struct {
-	gotInput  app.UploadInput
-	uploadErr error
-	getResult app.Uploaded
-	getErr    error
+	gotInput     app.UploadInput
+	uploadErr    error
+	getResult    app.Uploaded
+	getErr       error
+	gotRequester string
 }
 
 func (f *fakeService) Upload(_ context.Context, in app.UploadInput) (app.Uploaded, error) {
@@ -42,7 +43,8 @@ func (f *fakeService) Upload(_ context.Context, in app.UploadInput) (app.Uploade
 	return app.Uploaded{Media: m, PublicURL: "http://cdn/bozor-media/" + m.ObjectKey}, nil
 }
 
-func (f *fakeService) Get(_ context.Context, _ string) (app.Uploaded, error) {
+func (f *fakeService) Get(_ context.Context, _, requesterID string) (app.Uploaded, error) {
+	f.gotRequester = requesterID
 	if f.getErr != nil {
 		return app.Uploaded{}, f.getErr
 	}
@@ -179,4 +181,32 @@ func TestGet_NotFound(t *testing.T) {
 	rec := serve(newRouter(svc), httptest.NewRequest(http.MethodGet, "/api/v1/media/nope", nil))
 	assert.Equal(t, http.StatusNotFound, rec.Code)
 	assert.Contains(t, rec.Body.String(), "media_not_found")
+}
+
+func TestGet_PreviewsAndOwnerURL(t *testing.T) {
+	svc := &fakeService{getResult: app.Uploaded{
+		Media: domain.Media{
+			ID: "m1", OwnerUserID: "owner-1", ObjectKey: "originals/m1.jpg",
+			MimeType: "image/jpeg", SizeBytes: 200, Status: domain.StatusReady, CreatedAt: time.Unix(0, 0).UTC(),
+		},
+		PublicURL:   "http://cdn/bozor-media/originals/m1.jpg",
+		OriginalURL: "http://cdn/bozor-media/originals/m1.jpg?signed=1",
+		Previews: []app.PreviewView{
+			{Size: 120, Width: 120, Height: 90, URL: "http://cdn/bozor-media/previews/m1/120.jpg"},
+			{Size: 480, Width: 480, Height: 360, URL: "http://cdn/bozor-media/previews/m1/480.jpg"},
+		},
+	}}
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/media/m1", nil)
+	req.Header.Set("X-User-Id", "owner-1")
+	rec := serve(newRouter(svc), req)
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, "owner-1", svc.gotRequester, "идентичность проброшена в use-case")
+
+	var resp mediaResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Equal(t, "ready", resp.Status)
+	assert.Equal(t, "http://cdn/bozor-media/originals/m1.jpg?signed=1", resp.OriginalURL)
+	require.Len(t, resp.Previews, 2)
+	assert.Equal(t, 480, resp.Previews[1].Size)
+	assert.Contains(t, resp.Previews[0].URL, "previews/m1/120.jpg")
 }

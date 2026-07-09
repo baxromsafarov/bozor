@@ -390,6 +390,9 @@ services:
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
       MEDIA_BUCKET: ${MEDIA_BUCKET}
       MEDIA_PUBLIC_BASE_URL: ${MEDIA_PUBLIC_BASE_URL}
+      MEDIA_ORPHAN_TTL: ${MEDIA_ORPHAN_TTL:-24h}          # возраст непривязанного медиа до очистки
+      MEDIA_CLEAN_INTERVAL: ${MEDIA_CLEAN_INTERVAL:-15m}  # период запуска очистки сирот
+      MEDIA_PRESIGN_TTL: ${MEDIA_PRESIGN_TTL:-15m}        # срок жизни presigned-ссылки владельцу
       OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT}
     depends_on:
       postgres:

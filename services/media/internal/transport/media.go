@@ -24,7 +24,7 @@ const sniffLen = 512
 // Service — use-cases медиа (реализуется app.Service).
 type Service interface {
 	Upload(ctx context.Context, in app.UploadInput) (app.Uploaded, error)
-	Get(ctx context.Context, id string) (app.Uploaded, error)
+	Get(ctx context.Context, id, requesterID string) (app.Uploaded, error)
 }
 
 // Handler обслуживает эндпоинты медиа.
@@ -40,15 +40,24 @@ func NewHandler(svc Service, maxFileBytes int64, log *slog.Logger) *Handler {
 }
 
 type mediaResponse struct {
-	ID        string  `json:"id"`
-	URL       string  `json:"url"`
-	AdID      *string `json:"ad_id,omitempty"`
-	MimeType  string  `json:"mime_type"`
-	SizeBytes int64   `json:"size_bytes"`
-	Status    string  `json:"status"`
-	Width     *int    `json:"width,omitempty"`
-	Height    *int    `json:"height,omitempty"`
-	CreatedAt string  `json:"created_at"`
+	ID          string            `json:"id"`
+	URL         string            `json:"url"`
+	OriginalURL string            `json:"original_url,omitempty"` // presigned, только владельцу
+	AdID        *string           `json:"ad_id,omitempty"`
+	MimeType    string            `json:"mime_type"`
+	SizeBytes   int64             `json:"size_bytes"`
+	Status      string            `json:"status"`
+	Width       *int              `json:"width,omitempty"`
+	Height      *int              `json:"height,omitempty"`
+	Previews    []previewResponse `json:"previews,omitempty"`
+	CreatedAt   string            `json:"created_at"`
+}
+
+type previewResponse struct {
+	Size   int    `json:"size"`
+	Width  int    `json:"width"`
+	Height int    `json:"height"`
+	URL    string `json:"url"`
 }
 
 // Upload принимает multipart-файл, сохраняет оригинал и создаёт запись.
@@ -103,9 +112,9 @@ func (h *Handler) Upload(w http.ResponseWriter, r *http.Request) {
 	httpx.Respond(w, http.StatusCreated, toResponse(up))
 }
 
-// Get отдаёт метаданные медиа по id (публично).
+// Get отдаёт метаданные медиа по id (публично; владельцу — presigned-оригинал).
 func (h *Handler) Get(w http.ResponseWriter, r *http.Request) {
-	up, err := h.svc.Get(r.Context(), chi.URLParam(r, "id"))
+	up, err := h.svc.Get(r.Context(), chi.URLParam(r, "id"), authx.UserID(r.Context()))
 	if err != nil {
 		h.writeMediaError(w, r, err)
 		return
@@ -148,9 +157,15 @@ func (h *Handler) writeMediaError(w http.ResponseWriter, r *http.Request, err er
 
 func toResponse(up app.Uploaded) mediaResponse {
 	m := up.Media
-	return mediaResponse{
-		ID: m.ID, URL: up.PublicURL, AdID: m.AdID, MimeType: m.MimeType,
+	resp := mediaResponse{
+		ID: m.ID, URL: up.PublicURL, OriginalURL: up.OriginalURL, AdID: m.AdID, MimeType: m.MimeType,
 		SizeBytes: m.SizeBytes, Status: string(m.Status), Width: m.Width, Height: m.Height,
 		CreatedAt: m.CreatedAt.UTC().Format(time.RFC3339),
 	}
+	for _, p := range up.Previews {
+		resp.Previews = append(resp.Previews, previewResponse{
+			Size: p.Size, Width: p.Width, Height: p.Height, URL: p.URL,
+		})
+	}
+	return resp
 }

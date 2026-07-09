@@ -31,19 +31,21 @@ type Blob interface {
 	Put(ctx context.Context, objectKey string, r io.Reader, size int64, contentType string) error
 	Remove(ctx context.Context, objectKey string) error
 	PublicURL(objectKey string) string
+	PresignedURL(ctx context.Context, objectKey string, ttl time.Duration) (string, error)
 }
 
 // Service — use-cases медиа.
 type Service struct {
-	store  Store
-	blob   Blob
-	limits domain.Limits
-	log    *slog.Logger
+	store      Store
+	blob       Blob
+	limits     domain.Limits
+	presignTTL time.Duration
+	log        *slog.Logger
 }
 
 // NewService создаёт сервис медиа.
-func NewService(store Store, blob Blob, limits domain.Limits, log *slog.Logger) *Service {
-	return &Service{store: store, blob: blob, limits: limits, log: log}
+func NewService(store Store, blob Blob, limits domain.Limits, presignTTL time.Duration, log *slog.Logger) *Service {
+	return &Service{store: store, blob: blob, limits: limits, presignTTL: presignTTL, log: log}
 }
 
 // UploadInput — входные данные загрузки медиа.
@@ -54,10 +56,21 @@ type UploadInput struct {
 	Data        []byte
 }
 
-// Uploaded — результат загрузки (медиа + публичный URL оригинала).
+// Uploaded — результат загрузки/чтения медиа: сущность, публичный URL оригинала,
+// публичные URL превью и (только владельцу) presigned-ссылка на оригинал.
 type Uploaded struct {
-	Media     domain.Media
-	PublicURL string
+	Media       domain.Media
+	PublicURL   string
+	Previews    []PreviewView
+	OriginalURL string // presigned-ссылка на оригинал; непусто только владельцу
+}
+
+// PreviewView — превью с публичным URL для ответа API.
+type PreviewView struct {
+	Size   int
+	Width  int
+	Height int
+	URL    string
 }
 
 // Upload проверяет и сохраняет оригинал в хранилище, пишет запись + событие.
@@ -107,13 +120,28 @@ func (s *Service) Upload(ctx context.Context, in UploadInput) (Uploaded, error) 
 	return Uploaded{Media: m, PublicURL: s.blob.PublicURL(objectKey)}, nil
 }
 
-// Get возвращает медиа по id вместе с публичным URL.
-func (s *Service) Get(ctx context.Context, id string) (Uploaded, error) {
+// Get возвращает медиа по id: публичный URL оригинала, публичные URL превью и —
+// если requesterID совпадает с владельцем — presigned-ссылку на оригинал.
+func (s *Service) Get(ctx context.Context, id, requesterID string) (Uploaded, error) {
 	m, err := s.store.GetByID(ctx, id)
 	if err != nil {
 		return Uploaded{}, err
 	}
-	return Uploaded{Media: m, PublicURL: s.blob.PublicURL(m.ObjectKey)}, nil
+	up := Uploaded{Media: m, PublicURL: s.blob.PublicURL(m.ObjectKey)}
+	for _, p := range m.Previews {
+		up.Previews = append(up.Previews, PreviewView{
+			Size: p.Size, Width: p.Width, Height: p.Height, URL: s.blob.PublicURL(p.ObjectKey),
+		})
+	}
+	if requesterID != "" && requesterID == m.OwnerUserID {
+		if signed, err := s.blob.PresignedURL(ctx, m.ObjectKey, s.presignTTL); err != nil {
+			s.log.WarnContext(ctx, "не удалось создать presigned-ссылку",
+				slog.String("media_id", m.ID), slog.String("error", err.Error()))
+		} else {
+			up.OriginalURL = signed
+		}
+	}
+	return up, nil
 }
 
 // event собирает событие bozor.media.uploaded.

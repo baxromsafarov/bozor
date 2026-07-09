@@ -1,13 +1,17 @@
-status_id: "20260709-114500"
+status_id: "20260709-123800"
 project: "Bozor"
 version: "1.0"
 
 current:
   chapter: "3"                     # CHAPTER 3: Listings & Media
-  stage: "3.2"                     # STAGE 3.2: воркер обработки медиа (превью, EXIF, presigned/CDN, очистка сирот)
+  stage: "3.3"                     # STAGE 3.3: Listing-сервис — модель (ads, ad_attribute_values, ad_images, outbox)
   status: "not_started"
 
 completed:
+  - stage_id: "3.2"
+    title: "Воркер обработки медиа — превью 120/480/1080, снятие EXIF, presigned/CDN, очистка сирот"
+    completed_date: "2026-07-09"
+    evidence: "Media-сервис — первый консьюмер событий в проекте. Миграция 00002_media_processing: media += processed_at, previews jsonb DEFAULT '[]'; таблица processed_events (inbox-идемпотентность, DDL синхр. с pkg/shared/outbox). Пакет imaging (чистый Go, без cgo — github.com/disintegration/imaging + golang.org/x/image/webp): Decode с AutoOrientation (разворот по EXIF), Fit (Lanczos, вписывание БЕЗ увеличения), Encode (JPEG q82 / PNG для png-источника). Воркер (internal/worker): Processor.Handle потребляет bozor.media.uploaded (natsx.Consume, durable media-processor, maxDeliver=3→DLQ) — проверка inbox, GetByID, снятие EXIF повторным кодированием (перезапись оригинала по тому же object_key), генерация превью previews/<id>/<size>.<ext> с дедупом по фактическому размеру, атомарно uploaded→ready + событие bozor.media.processed + отметка inbox (MarkProcessedWithEvent, переход только из uploaded → идемпотентно); отсутствующее/уже готовое медиа — только отметка inbox. Cleaner: тикер MEDIA_CLEAN_INTERVAL удаляет сирот (ad_id IS NULL старше MEDIA_ORPHAN_TTL) пакетами — объекты (оригинал+превью, RemoveObject идемпотентен) + запись/событие bozor.media.deleted в одной tx. storage += Get (чтение оригинала), PresignedURL. app.Get(requesterID): публичные URL превью (CDN-база) + владельцу presigned-ссылка на оригинал (MEDIA_PRESIGN_TTL). Транспорт: mediaResponse += previews[] и original_url (presigned, только владельцу). repo += IsEventProcessed/MarkEventProcessed/MarkProcessedWithEvent/ListOrphans/DeleteWithEvent; scanMedia читает previews/processed_at. Конфиг + compose + .env(.example): MEDIA_ORPHAN_TTL(24h)/MEDIA_CLEAN_INTERVAL(15m)/MEDIA_PRESIGN_TTL(15m). ADR-018. Тесты: unit imaging (dims, Fit-даунскейл/без-апскейла, JPEG/PNG), worker (генерация 3 превью+ready+событие, дедуп маленького оригинала→1 превью, идемпотентность/отсутствие/уже-ready, cleaner удаляет блобы+запись), app (previews в ответе, presigned владельцу/не чужому), transport (previews+original_url, проброс идентичности) + integration на testcontainers postgres (MarkProcessedWithEvent→ready+processed_at+previews+outbox=2+inbox, повтор идемпотентен без дубля события; MarkEventProcessed повтор; ListOrphans игнорирует привязанные/свежие; DeleteWithEvent+повтор→ErrMediaNotFound) — go test PASS (default+integration, 19.7s); golangci-lint 0 issues (оба тега); gofmt чисто; go work sync — все 6 модулей зелёные. Живая проверка (media healthy, миграция 00002 applied): upload 1600×1200 JPEG→201 uploaded; воркер→ready, width/height 1600×1200, 3 превью 120×90/480×360/1080×810 (аспект 4:3, без апскейла) — объекты в MinIO (120.jpg HTTP 200, валидный JPEG 120×90); оригинал перезаписан (165020→132605 байт); GET владельцем → previews[]+presigned original_url; bozor.media.uploaded+bozor.media.processed published=t, processed_events(media-processor)=1. EXIF: во внедрённый в JPEG маркер Exif+GPS после обработки отсутствует (grep=0) — снят повторным кодированием. Очистка сирот (короткий TTL 5s/интервал 10s): непривязанное медиа удалено (row 0, GET 404, оригинал 404), bozor.media.deleted published; лог 'очищены медиа-сироты count=…'; TTL возвращён к 24h/15m"
   - stage_id: "3.1"
     title: "Media-сервис — загрузка оригиналов в MinIO (POST /media, таблица media)"
     completed_date: "2026-07-09"
@@ -75,8 +79,9 @@ completed:
     evidence: "services/location (модуль bozor/services/location в go.work). Миграции: 00001 схема (regions: id smallint PK, slug UNIQUE, name_uz/name_ru, lat/lon, sort_order; cities: id PK, region_id FK ON DELETE CASCADE, slug UNIQUE, имена/гео/sort, индекс по region_id,sort_order) + 00002 идемпотентный сид (ADR-007, ON CONFLICT DO UPDATE): 14 первичных регионов (12 областей + г.Ташкент + Респ. Каракалпакстан) и 56 городов/районов с реальными координатами WGS84 — включая 12 районов Ташкента и по 2–4 города на регион (апострофы в узбекских названиях экранированы: Farg'ona, Qo'qon, Qoraqalpog'iston и т.д.). Слой: domain (Region/City, lat/lon *float64, ErrRegionNotFound), repo (Regions/CitiesByRegion/RegionExists через pgx, ORDER BY sort_order), app (Service; Cities → 404 при несуществующем регионе, пустой список = регион без городов), transport (chi + middleware pkg/shared, GET /api/v1/locations/regions, GET /api/v1/locations/regions/{id}/cities; 422 на нечисловой id). Config: только DSN (app→PgBouncer, migrate→Postgres напрямую, ADR-013). Миграции при старте через pkg/shared/migrate. Dockerfile build-local go.work → distroless nonroot, healthcheck /location -health. Compose: сервис location + dev-порт 8082 + scrape-job prometheus. Тесты: unit (config DSN, transport regions/cities/404/422/not-found) + integration на testcontainers postgres (14 регионов, 56 городов, 12 районов Ташкента, апостроф Farg'ona, RegionExists, пустой список для чужого региона) — go test -tags=integration PASS (6.7s); golangci-lint 0 issues (default+integration). Живая проверка (15 контейнеров): миграции applied=2, рестарт→applied=0 (идемпотентно); /readyz ready; напрямую и через gateway (routing /api/v1/locations→location): 14 регионов (первый — г.Ташкент), 12 районов Ташкента, апостроф Farg'ona корректен, Самарканд/Каттакурган/Ургут; 404 неизвестный регион, 422 нечисловой id; Prometheus up{job=location}=1"
 
 next_actions:
-  - "Stage 3.2: воркер обработки медиа — превью 120/480/1080, удаление EXIF, presigned/CDN URL, очистка сирот по TTL (задачи через NATS, консьюмер bozor.media.uploaded → bozor.media.processed)"
-  - "Stage 3.3: listing-сервис — таблицы ads, ad_attribute_values (валидация против Catalog), ad_images (финализация привязки media→объявление), outbox"
+  - "Stage 3.3: listing-сервис — таблицы ads, ad_attribute_values (валидация значений против Catalog), ad_images (привязка медиа к объявлению, обложка), outbox"
+  - "Stage 3.4: жизненный цикл объявления — draft→pending→active/rejected; active→sold/expired/archived; blocked; renew; воркер истечения по expires_at"
+  - "Stage 3.5: счётчик просмотров — буфер в Redis + периодический флеш в БД (без write-hotspot)"
 
 decisions:                         # краткие ссылки; полные ADR — в DECISIONS.md
   - decision: "Брокер — NATS JetStream (не Kafka) ради лёгкости на Compose"
@@ -119,6 +124,10 @@ decisions:                         # краткие ссылки; полные A
     rationale: "Объектное хранилище масштабируется отдельно от БД; sniffing http.DetectContentType не даёт подделать тип; связь с объявлением финализируется в ad_images (3.3), db-per-service сохранён; запись+событие в одной outbox-tx, компенсация при сбое"
     date: "2026-07-09"
     alternatives: ["bytea в БД", "доверять Content-Type клиента", "FK ad_id на таблицу ads"]
+  - decision: "Обработка медиа: фоновый воркер в процессе сервиса, imaging (чистый Go), снятие EXIF повторным кодированием, inbox-идемпотентность, очистка сирот по TTL (ADR-018)"
+    rationale: "Один деплой (консьюмер+тикер рядом с HTTP/relay); imaging без cgo (Windows-разработка); re-encode отбрасывает EXIF/GPS; processed_events+переход только из uploaded дают exactly-once; превью публично (CDN), оригинал владельцу presigned"
+    date: "2026-07-09"
+    alternatives: ["Отдельный worker-деплой", "libvips/ImageMagick (cgo)", "Парсинг/зачистка EXIF-тегов", "Хранить сирот бессрочно"]
 
 open_questions: []
 
@@ -135,10 +144,10 @@ tech_stack:
   deploy: ["Docker Compose", "nginx"]
 
 metrics:
-  completed_stages: 16
+  completed_stages: 17
   total_stages: 52
-  completion_percentage: 31
-  estimated_remaining_stages: 36
-  chapters_completed: ["0", "1", "2"]   # CHAPTER 0, 1, 2 завершены; CHAPTER 3 (Listings & Media) начат — Stage 3.1 (Media upload) готов
+  completion_percentage: 33
+  estimated_remaining_stages: 35
+  chapters_completed: ["0", "1", "2"]   # CHAPTER 0, 1, 2 завершены; CHAPTER 3 (Listings & Media) в работе — 3.1 (upload) + 3.2 (обработка) готовы
 
 notes: "Backend-only, фронтенда нет. Целевая нагрузка: десятки тысяч DAU. Автономный режим работы подтверждён заказчиком. Коммиты — от имени baxromsafarov. Окружение: Windows 11, Go 1.26.4, Docker Desktop 29.2.1 + Compose v5, golangci-lint 2.12.2, goose, buf. Нюанс: локально go test без -race (нет cgo на Windows); -race выполняется в CI на Ubuntu. goconst min-occurrences=5. Инфра-нюансы (Stage 0.3): postgres:18 монтирует /var/lib/postgresql (не .../data); healthcheck typesense — через bash /dev/tcp (нет curl/wget/nc в образе). Локальный .env создаётся из .env.example (gitignore)."

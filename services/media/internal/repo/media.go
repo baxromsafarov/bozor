@@ -3,8 +3,10 @@ package repo
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -17,7 +19,7 @@ import (
 )
 
 const selectColumns = `id, owner_user_id, ad_id, bucket, object_key, mime_type,
-	size_bytes, status, width, height, created_at`
+	size_bytes, status, width, height, previews, processed_at, created_at`
 
 // Repo — репозиторий медиа.
 type Repo struct {
@@ -66,14 +68,102 @@ func (r *Repo) GetByID(ctx context.Context, id string) (domain.Media, error) {
 	return m, nil
 }
 
+// IsEventProcessed сообщает, обрабатывал ли consumer событие eventID (inbox).
+func (r *Repo) IsEventProcessed(ctx context.Context, consumer, eventID string) (bool, error) {
+	return outbox.AlreadyProcessed(ctx, r.pool, consumer, eventID)
+}
+
+// MarkEventProcessed помечает событие обработанным без иных изменений
+// (для пропуска: медиа уже готово/удалено, повторная обработка не нужна).
+func (r *Repo) MarkEventProcessed(ctx context.Context, consumer, eventID string) error {
+	return outbox.MarkProcessed(ctx, r.pool, consumer, eventID)
+}
+
+// MarkProcessedWithEvent атомарно переводит медиа в статус ready (размеры,
+// превью, момент обработки), публикует bozor.media.processed через outbox и
+// отмечает событие обработанным (inbox) — всё в одной транзакции.
+// Переход выполняется только из статуса uploaded (идемпотентность): повторная
+// доставка не плодит событие, но всё равно отмечает событие обработанным.
+func (r *Repo) MarkProcessedWithEvent(ctx context.Context, consumer, eventID string, m domain.Media, ev events.Envelope) error {
+	previews, err := json.Marshal(m.Previews)
+	if err != nil {
+		return fmt.Errorf("repo: сериализация превью: %w", err)
+	}
+	return pgxx.WithTx(ctx, r.pool, func(tx pgx.Tx) error {
+		tag, err := tx.Exec(ctx, `
+			UPDATE media SET width = $2, height = $3, status = $4,
+				processed_at = now(), previews = $5
+			WHERE id = $1 AND status = $6
+		`, m.ID, m.Width, m.Height, string(domain.StatusReady), previews, string(domain.StatusUploaded))
+		if err != nil {
+			return fmt.Errorf("repo: обновление медиа: %w", err)
+		}
+		if tag.RowsAffected() > 0 {
+			if err := outbox.Enqueue(ctx, tx, ev); err != nil {
+				return err
+			}
+		}
+		return outbox.MarkProcessed(ctx, tx, consumer, eventID)
+	})
+}
+
+// ListOrphans возвращает непривязанные к объявлению медиа (ad_id IS NULL),
+// созданные раньше olderThan, — кандидаты на очистку (не более limit за проход).
+func (r *Repo) ListOrphans(ctx context.Context, olderThan time.Time, limit int) ([]domain.Media, error) {
+	rows, err := r.pool.Query(ctx, `SELECT `+selectColumns+`
+		FROM media WHERE ad_id IS NULL AND created_at < $1
+		ORDER BY created_at LIMIT $2`, olderThan, limit)
+	if err != nil {
+		return nil, fmt.Errorf("repo: выборка сирот: %w", err)
+	}
+	defer rows.Close()
+
+	var out []domain.Media
+	for rows.Next() {
+		m, err := scanMedia(rows)
+		if err != nil {
+			return nil, fmt.Errorf("repo: чтение сироты: %w", err)
+		}
+		out = append(out, m)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("repo: перебор сирот: %w", err)
+	}
+	return out, nil
+}
+
+// DeleteWithEvent удаляет запись о медиа и публикует событие в outbox одной
+// транзакцией (domain.ErrMediaNotFound, если записи уже нет).
+func (r *Repo) DeleteWithEvent(ctx context.Context, id string, ev events.Envelope) error {
+	return pgxx.WithTx(ctx, r.pool, func(tx pgx.Tx) error {
+		tag, err := tx.Exec(ctx, `DELETE FROM media WHERE id = $1`, id)
+		if err != nil {
+			return fmt.Errorf("repo: удаление медиа: %w", err)
+		}
+		if tag.RowsAffected() == 0 {
+			return domain.ErrMediaNotFound
+		}
+		return outbox.Enqueue(ctx, tx, ev)
+	})
+}
+
 // scanMedia читает строку медиа.
 func scanMedia(row pgx.Row) (domain.Media, error) {
 	var (
-		m      domain.Media
-		status string
+		m        domain.Media
+		status   string
+		previews []byte
 	)
 	err := row.Scan(&m.ID, &m.OwnerUserID, &m.AdID, &m.Bucket, &m.ObjectKey, &m.MimeType,
-		&m.SizeBytes, &status, &m.Width, &m.Height, &m.CreatedAt)
+		&m.SizeBytes, &status, &m.Width, &m.Height, &previews, &m.ProcessedAt, &m.CreatedAt)
+	if err != nil {
+		return domain.Media{}, err
+	}
 	m.Status = domain.Status(status)
-	return m, err
+	if len(previews) > 0 {
+		if err := json.Unmarshal(previews, &m.Previews); err != nil {
+			return domain.Media{}, fmt.Errorf("repo: разбор превью: %w", err)
+		}
+	}
+	return m, nil
 }
