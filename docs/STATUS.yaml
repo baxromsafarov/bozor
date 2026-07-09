@@ -1,13 +1,17 @@
-status_id: "20260709-223000"
+status_id: "20260709-233000"
 project: "Bozor"
 version: "1.0"
 
 current:
   chapter: "5"                     # CHAPTER 5: Profiles, Favorites & Saved Searches
-  stage: "5.2"                     # STAGE 5.2: Избранное (favorites)
+  stage: "5.3"                     # STAGE 5.3: Сохранённые поиски + matcher
   status: "not_started"
 
 completed:
+  - stage_id: "5.2"
+    title: "Избранное: сервис favorites-savedsearch — POST/DELETE /favorites/{adId}, GET /me/favorites; очистка по bozor.ad.deleted"
+    completed_date: "2026-07-09"
+    evidence: "Новый сервис bozor/services/favorites-savedsearch (БД bozor_favorites, dev-порт 8088; ADR-028; каркас общий с сохранёнными поисками 5.3). Миграция 00001: favorites (PK user_id+ad_id, created_at; idx user+created_at DESC для ленты, idx ad_id для очистки; ad_id из Listing без кросс-БД FK). domain: Favorite, ErrInvalidAdID. repo: Add (INSERT ON CONFLICT (user_id,ad_id) DO UPDATE SET created_at=favorites.created_at RETURNING created_at — идемпотентно, сохраняет исходное время), Remove (DELETE, возвращает «существовала»), ListByUser (created_at DESC, keyset-независимая пагинация LIMIT/OFFSET), RemoveByAd (очистка по объявлению). app: Add/Remove (валидация ad_id как UUID→ErrInvalidAdID; существование объявления НЕ проверяется — децентрализация, удалённые чистит consumer), List (clampLimit 20/100, clampOffset), RemoveByAd; без событий-публикаций (у избранного их нет). worker.AdDeleted: консьюмер favorites-ad-deleted на bozor.ad.deleted (maxDeliver=3→DLQ; DELETE по ad_id идемпотентен — inbox не нужен). transport: chi + FromForwardedHeaders; POST /api/v1/favorites/{adId} (201 с ad_id/created_at), DELETE (204), GET /api/v1/me/favorites (список+limit/offset); 401 анониму, 422 invalid_ad_id. main: миграции+otel+metrics+pgx+NATS(консьюмер bozor.ad.deleted; relay не нужен — нет исходящих событий), health/ready[postgres,nats]. gateway: /api/v1/me/favorites→favorites-savedsearch добавлен перед /api/v1/me→user-profile (chi приоритет статического сегмента); /api/v1/favorites уже вёл на сервис. Dockerfile distroless (бинарь /favorites); compose-сервис (dep postgres/pgbouncer/nats healthy, dev :8088) + prometheus scrape + override-порт; БД bozor_favorites уже в postgres-init. Тесты: unit app (Add валидация UUID/идемпотентность, Remove идемпотентность/невалидный, List clamp, RemoveByAd для нескольких пользователей) + worker (RemoveByAd/пустой ad_id/ошибка БД→повтор) + transport (Add 201/401/422, Remove 204, List 200/401 через FromForwardedHeaders) + integration на testcontainers postgres (Add идемпотентен с сохранением created_at + лента DESC, Remove идемпотентен, RemoveByAd убирает у всех кроме прочих объявлений, пагинация LIMIT/OFFSET) + gateway (TestRoutes_MeFavoritesPrecedence: /me/favorites→favorites, /me→user-profile) — go test PASS (unit + integration 11.9s); golangci-lint 0 issues (default+integration); gofmt чисто; go work sync — все 10 модулей зелёные. Живая проверка (favorites-savedsearch+gateway healthy, миграция applied=1, таблица favorites): POST /favorites/{ad}→201 {ad_id,created_at}, повтор→то же created_at (идемпотентно); POST 2-го объявления; невалидный ad_id→422 invalid_ad_id; аноним→401; GET /me/favorites→оба, свежее сверху; DELETE→204, список сократился; publish bozor.ad.deleted(ad2) → consumer убрал (список пуст, лог 'объявление убрано из избранного removed=1'). Gateway :8080: /me/favorites и /favorites/{id}→favorites-savedsearch по access-логам, user-profile 0 обращений к me/favorites. Прим.: обогащение ленты данными объявлений (title/price) не входит в 5.2 — /me/favorites отдаёт ad_id+created_at; при необходимости — batch-запрос в Search/Listing позже"
   - stage_id: "5.1"
     title: "User/Profile-сервис: профили (individual/business), настройки уведомлений, кеш рейтинга; API /me, /users/{id}, /me/notification-prefs; потребление bozor.user.created; CHAPTER 5 начат"
     completed_date: "2026-07-09"
@@ -115,9 +119,9 @@ completed:
     evidence: "services/location (модуль bozor/services/location в go.work). Миграции: 00001 схема (regions: id smallint PK, slug UNIQUE, name_uz/name_ru, lat/lon, sort_order; cities: id PK, region_id FK ON DELETE CASCADE, slug UNIQUE, имена/гео/sort, индекс по region_id,sort_order) + 00002 идемпотентный сид (ADR-007, ON CONFLICT DO UPDATE): 14 первичных регионов (12 областей + г.Ташкент + Респ. Каракалпакстан) и 56 городов/районов с реальными координатами WGS84 — включая 12 районов Ташкента и по 2–4 города на регион (апострофы в узбекских названиях экранированы: Farg'ona, Qo'qon, Qoraqalpog'iston и т.д.). Слой: domain (Region/City, lat/lon *float64, ErrRegionNotFound), repo (Regions/CitiesByRegion/RegionExists через pgx, ORDER BY sort_order), app (Service; Cities → 404 при несуществующем регионе, пустой список = регион без городов), transport (chi + middleware pkg/shared, GET /api/v1/locations/regions, GET /api/v1/locations/regions/{id}/cities; 422 на нечисловой id). Config: только DSN (app→PgBouncer, migrate→Postgres напрямую, ADR-013). Миграции при старте через pkg/shared/migrate. Dockerfile build-local go.work → distroless nonroot, healthcheck /location -health. Compose: сервис location + dev-порт 8082 + scrape-job prometheus. Тесты: unit (config DSN, transport regions/cities/404/422/not-found) + integration на testcontainers postgres (14 регионов, 56 городов, 12 районов Ташкента, апостроф Farg'ona, RegionExists, пустой список для чужого региона) — go test -tags=integration PASS (6.7s); golangci-lint 0 issues (default+integration). Живая проверка (15 контейнеров): миграции applied=2, рестарт→applied=0 (идемпотентно); /readyz ready; напрямую и через gateway (routing /api/v1/locations→location): 14 регионов (первый — г.Ташкент), 12 районов Ташкента, апостроф Farg'ona корректен, Самарканд/Каттакурган/Ургут; 404 неизвестный регион, 422 нечисловой id; Prometheus up{job=location}=1"
 
 next_actions:
-  - "Stage 5.2: Избранное — таблица favorites; POST/DELETE /favorites/{adId}, GET /me/favorites (сервис favorites-savedsearch)"
-  - "Stage 5.3: Сохранённые поиски + matcher — таблица saved_searches; на bozor.ad.approved matcher оценивает фильтры (переиспользуют Query/фильтры Search 4.3), батчинг/дедуп/защита от лавины, событие для Notification"
-  - "CHAPTER 6 (Moderation & Notifications): 6.1 Notification-сервис (потребляет notification_prefs из User/Profile)"
+  - "Stage 5.3: Сохранённые поиски + matcher — таблица saved_searches (query_json, notify_enabled, last_notified_at); POST /saved-searches, GET /me/saved-searches, DELETE /saved-searches/{id}; на bozor.ad.approved matcher оценивает фильтры (индекс по category_id/region_id в памяти, дедуп пары (saved_search_id, ad_id), last_notified_at против лавины), публикует событие совпадения для Notification; стратегия — в ARCHITECTURE.md §4.8"
+  - "CHAPTER 6 (Moderation & Notifications): 6.1 Notification-сервис (потребляет notification_prefs из User/Profile, событие совпадения из 5.3)"
+  - "Обогащение /me/favorites данными объявлений (batch в Search/Listing) — опционально позже"
 
 decisions:                         # краткие ссылки; полные ADR — в DECISIONS.md
   - decision: "Брокер — NATS JetStream (не Kafka) ради лёгкости на Compose"
@@ -200,6 +204,10 @@ decisions:                         # краткие ссылки; полные A
     rationale: "Идентичность (телефон/telegram) в Auth, расширенный профиль отдельно (db-per-service); профиль создаётся по событию, но /me создаёт дефолт лениво — устойчивость к лагу шины (обе вставки идемпотентны ON CONFLICT DO NOTHING); настройки уведомлений хранят только отклонения от дефолта (эффективный набор = дефолты ⊕ сохранённые), новые типы уведомлений включены без миграции данных; строковые фильтры/имена не применимы, зато /me/ads (Listing) разведён от /me (Profile) более специфичным префиксом в gateway (chi приоритет статического сегмента); consumer bozor.review.created отложен до Reviews (CHAPTER 9)"
     date: "2026-07-09"
     alternatives: ["Профиль внутри Auth", "Создавать профиль только по событию (404 при лаге)", "Хранить полный набор notification_prefs строками", "Разводить /me/ads в самих сервисах"]
+  - decision: "Favorites — сервис favorites-savedsearch (БД bozor_favorites): избранное без проверки существования объявления, очистка по bozor.ad.deleted, /me/favorites отдаёт ad_id (без обогащения) (ADR-028)"
+    rationale: "POST /favorites/{adId} не валидирует объявление против Listing/Search (децентрализация, без синхронной связности на записи) — удалённые объявления убирает consumer bozor.ad.deleted (DELETE по ad_id идемпотентен, inbox не нужен); Add идемпотентен через ON CONFLICT DO UPDATE (сохраняет исходное created_at); лента /me/favorites возвращает ad_id+created_at без обогащения данными объявления (db-per-service; batch-обогащение через Search — позже); /me/favorites разведён от /me (Profile) более специфичным префиксом в gateway; сервис общий с сохранёнными поисками (5.3) — потому имя favorites-savedsearch"
+    date: "2026-07-09"
+    alternatives: ["Проверять существование объявления при добавлении (gRPC/HTTP к Listing)", "Обогащать ленту в самом сервисе", "Отдельный сервис только под favorites", "Inbox для bozor.ad.deleted"]
 
 open_questions: []
 
@@ -216,10 +224,10 @@ tech_stack:
   deploy: ["Docker Compose", "nginx"]
 
 metrics:
-  completed_stages: 26
+  completed_stages: 27
   total_stages: 52
-  completion_percentage: 50
-  estimated_remaining_stages: 26
-  chapters_completed: ["0", "1", "2", "3", "4"]   # CHAPTER 0-4 завершены; CHAPTER 5 (Profiles/Favorites/SavedSearches) в работе — 5.1 (User/Profile) готов, далее 5.2 (Favorites), 5.3 (SavedSearches)
+  completion_percentage: 52
+  estimated_remaining_stages: 25
+  chapters_completed: ["0", "1", "2", "3", "4"]   # CHAPTER 0-4 завершены; CHAPTER 5 в работе — 5.1 (User/Profile) + 5.2 (Favorites) готовы, осталась 5.3 (SavedSearches+matcher)
 
 notes: "Backend-only, фронтенда нет. Целевая нагрузка: десятки тысяч DAU. Автономный режим работы подтверждён заказчиком. Коммиты — от имени baxromsafarov. Окружение: Windows 11, Go 1.26.4, Docker Desktop 29.2.1 + Compose v5, golangci-lint 2.12.2, goose, buf. Нюанс: локально go test без -race (нет cgo на Windows); -race выполняется в CI на Ubuntu. goconst min-occurrences=5. Инфра-нюансы (Stage 0.3): postgres:18 монтирует /var/lib/postgresql (не .../data); healthcheck typesense — через bash /dev/tcp (нет curl/wget/nc в образе). Локальный .env создаётся из .env.example (gitignore)."

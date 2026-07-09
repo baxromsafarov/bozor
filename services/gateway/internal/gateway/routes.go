@@ -16,8 +16,9 @@ type Route struct {
 var Routes = []Route{
 	{Prefix: "/api/v1/auth", Service: "auth"},
 	{Prefix: "/api/v1/users", Service: "user-profile"},
-	// Мои объявления — в Listing (более специфично, чем /me → user-profile).
+	// Мои объявления/избранное — более специфичны, чем /me → user-profile.
 	{Prefix: "/api/v1/me/ads", Service: "listing-ads"},
+	{Prefix: "/api/v1/me/favorites", Service: "favorites-savedsearch"},
 	{Prefix: "/api/v1/me", Service: "user-profile"},
 	{Prefix: "/api/v1/categories", Service: "catalog"},
 	{Prefix: "/api/v1/attributes", Service: "catalog"},

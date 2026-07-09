@@ -4,6 +4,7 @@ use (
 	./pkg/shared
 	./services/auth
 	./services/catalog
+	./services/favorites-savedsearch
 	./services/gateway
 	./services/listing
 	./services/location
