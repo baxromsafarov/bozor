@@ -55,6 +55,9 @@ type searchResponse struct {
 	Found   int        `json:"found"`
 	Page    int        `json:"page"`
 	PerPage int        `json:"per_page"`
+	// Top — топ-блок (featured/TOP над основной выдачей); заглушка до Promotions
+	// (CHAPTER 8): непустой лишь на первой странице и когда есть TOP-объявления.
+	Top []adHitDTO `json:"top"`
 }
 
 type facetValueDTO struct {
@@ -143,14 +146,19 @@ func parseGeo(q url.Values) *app.Geo {
 }
 
 func toSearchResponse(res app.Result) searchResponse {
-	out := searchResponse{
-		Hits:    make([]adHitDTO, 0, len(res.Hits)),
+	return searchResponse{
+		Hits:    toHitDTOs(res.Hits),
 		Found:   res.Found,
 		Page:    res.Page,
 		PerPage: res.PerPage,
+		Top:     toHitDTOs(res.Top),
 	}
-	for _, h := range res.Hits {
-		out.Hits = append(out.Hits, adHitDTO{
+}
+
+func toHitDTOs(hits []app.AdHit) []adHitDTO {
+	out := make([]adHitDTO, 0, len(hits))
+	for _, h := range hits {
+		out = append(out, adHitDTO{
 			ID: h.ID, Title: h.Title, Description: h.Description, CategoryID: h.CategoryID,
 			RegionID: h.RegionID, CityID: h.CityID, Price: h.Price, Currency: h.Currency,
 			Attrs: h.Attrs, IsTop: h.IsTop, CreatedAt: h.CreatedAt, BumpedAt: h.BumpedAt, Location: h.Location,

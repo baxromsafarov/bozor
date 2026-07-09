@@ -74,6 +74,7 @@ func TestSearchHandler_Search(t *testing.T) {
 	fs := &fakeSearcher{res: app.Result{
 		Found: 1, Page: 1, PerPage: 20,
 		Hits: []app.AdHit{{ID: "ad-1", Title: "BMW", CategoryID: "cars", Price: 4000, Currency: "USD"}},
+		Top:  []app.AdHit{{ID: "top-1", Title: "Featured", IsTop: true}},
 	}}
 	h := NewSearchHandler(fs, discardLogger())
 
@@ -86,6 +87,9 @@ func TestSearchHandler_Search(t *testing.T) {
 	assert.Equal(t, 1, body.Found)
 	require.Len(t, body.Hits, 1)
 	assert.Equal(t, "ad-1", body.Hits[0].ID)
+	require.Len(t, body.Top, 1, "топ-блок в ответе")
+	assert.Equal(t, "top-1", body.Top[0].ID)
+	assert.True(t, body.Top[0].IsTop)
 	assert.Equal(t, "bmw", fs.gotQuery.Text)
 }
 

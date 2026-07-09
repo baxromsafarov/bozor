@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -11,20 +12,34 @@ import (
 	"bozor/services/search/internal/search"
 )
 
-// fakeDocs фиксирует переданные параметры и возвращает заготовленный ответ.
+// fakeDocs фиксирует все запросы и отвечает по фильтру: топ-блок (is_top) —
+// отдельным результатом, остальное — основным.
 type fakeDocs struct {
-	params search.SearchParams
-	res    *search.SearchResult
+	calls  []search.SearchParams
+	res    *search.SearchResult // основной ответ
+	topRes *search.SearchResult // ответ на запрос топ-блока (is_top:=true)
 	err    error
 }
 
 func (f *fakeDocs) Search(_ context.Context, _ string, p search.SearchParams) (*search.SearchResult, error) {
-	f.params = p
-	if f.res == nil {
+	f.calls = append(f.calls, p)
+	if f.err != nil {
 		return &search.SearchResult{}, f.err
 	}
-	return f.res, f.err
+	if strings.Contains(p.FilterBy, "is_top:=true") {
+		if f.topRes != nil {
+			return f.topRes, nil
+		}
+		return &search.SearchResult{}, nil
+	}
+	if f.res == nil {
+		return &search.SearchResult{}, nil
+	}
+	return f.res, nil
 }
+
+// last возвращает параметры последнего запроса.
+func (f *fakeDocs) last() search.SearchParams { return f.calls[len(f.calls)-1] }
 
 func i64(v int64) *int64 { return &v }
 
@@ -155,4 +170,53 @@ func TestService_Facets_Maps(t *testing.T) {
 	assert.Equal(t, "category_id", facets[0].Field)
 	assert.Equal(t, "cars", facets[0].Values[0].Value)
 	assert.Equal(t, 3, facets[0].Values[0].Count)
+}
+
+func docHit(id string) search.Hit {
+	raw, _ := json.Marshal(adDocument{ID: id, Title: id, IsTop: true})
+	return search.Hit{Document: raw}
+}
+
+func TestBuildTopParams(t *testing.T) {
+	p := buildTopParams(Query{CategoryID: "cars", RegionID: 14})
+	assert.Equal(t, "*", p.Q, "топ-блок не зависит от текста")
+	assert.Equal(t, "category_id:=`cars` && region_id:=14 && is_top:=true", p.FilterBy)
+	assert.Equal(t, "promotion_rank:desc,created_at:desc", p.SortBy)
+	assert.Equal(t, TopBlockSize, p.PerPage)
+
+	// Без фильтров — только is_top.
+	assert.Equal(t, "is_top:=true", buildTopParams(Query{}).FilterBy)
+}
+
+func TestService_Search_TopBlockOnFirstPage(t *testing.T) {
+	docs := &fakeDocs{
+		res:    &search.SearchResult{Found: 2, Hits: []search.Hit{docHit("ad-1")}},
+		topRes: &search.SearchResult{Found: 1, Hits: []search.Hit{docHit("top-1")}},
+	}
+	res, err := NewService(docs).Search(context.Background(), Query{Text: "bmw", Page: 1})
+	require.NoError(t, err)
+	require.Len(t, res.Hits, 1)
+	require.Len(t, res.Top, 1, "топ-блок наполнен на первой странице")
+	assert.Equal(t, "top-1", res.Top[0].ID)
+	require.Len(t, docs.calls, 2, "основной запрос + запрос топ-блока")
+	assert.Contains(t, docs.last().FilterBy, "is_top:=true")
+}
+
+func TestService_Search_NoTopBlockAfterFirstPage(t *testing.T) {
+	docs := &fakeDocs{
+		res:    &search.SearchResult{Found: 30, Hits: []search.Hit{docHit("ad-1")}},
+		topRes: &search.SearchResult{Hits: []search.Hit{docHit("top-1")}},
+	}
+	res, err := NewService(docs).Search(context.Background(), Query{Page: 2})
+	require.NoError(t, err)
+	assert.Empty(t, res.Top, "топ-блок только на первой странице")
+	require.Len(t, docs.calls, 1, "без запроса топ-блока")
+}
+
+func TestService_Search_TopBlockEmptyWhenNoTopAds(t *testing.T) {
+	// topRes не задан → нет TOP-объявлений (состояние до Promotions).
+	docs := &fakeDocs{res: &search.SearchResult{Found: 1, Hits: []search.Hit{docHit("ad-1")}}}
+	res, err := NewService(docs).Search(context.Background(), Query{Page: 1})
+	require.NoError(t, err)
+	assert.Empty(t, res.Top)
 }

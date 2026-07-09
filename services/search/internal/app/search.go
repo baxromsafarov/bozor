@@ -23,6 +23,11 @@ const (
 	// queryByFields — поля полнотекста; заголовок весомее описания.
 	queryByFields  = "title,description"
 	queryByWeights = "2,1"
+	// TopBlockSize — максимум TOP-объявлений в топ-блоке выдачи (заглушка до
+	// Promotions, CHAPTER 8; ротация «макс. 5 на категорию» — Stage 8.6).
+	TopBlockSize = 5
+	// topSort — порядок топ-блока: выше promotion_rank, затем свежесть.
+	topSort = "promotion_rank:desc,created_at:desc"
 )
 
 // Режимы сортировки результата (значения параметра sort).
@@ -91,12 +96,14 @@ type Facet struct {
 	Values []FacetValue
 }
 
-// Result — результат поиска: попадания, общее число, страница.
+// Result — результат поиска: попадания, общее число, страница и топ-блок
+// (featured/TOP-объявления над основной выдачей — заглушка до Promotions).
 type Result struct {
 	Hits    []AdHit
 	Found   int
 	Page    int
 	PerPage int
+	Top     []AdHit
 }
 
 // Docs — операции поиска над read-моделью (реализуется search.Client).
@@ -112,13 +119,33 @@ type Service struct {
 // NewService создаёт сервис поиска.
 func NewService(docs Docs) *Service { return &Service{docs: docs} }
 
-// Search выполняет поиск объявлений и возвращает страницу попаданий.
+// Search выполняет поиск объявлений и возвращает страницу попаданий. На первой
+// странице дополнительно наполняется топ-блок (featured/TOP) — заглушка до
+// Promotions (CHAPTER 8): пока is_top не проставляется, блок пуст.
 func (s *Service) Search(ctx context.Context, q Query) (Result, error) {
 	res, err := s.docs.Search(ctx, search.AdsCollection, buildParams(q, false))
 	if err != nil {
 		return Result{}, err
 	}
-	return toResult(res, q), nil
+	out := toResult(res, q)
+	if clampPage(q.Page) == 1 {
+		top, err := s.topBlock(ctx, q)
+		if err != nil {
+			return Result{}, err
+		}
+		out.Top = top
+	}
+	return out, nil
+}
+
+// topBlock возвращает TOP-объявления, релевантные фильтрам запроса (без учёта
+// текста — это врезка промо по категории/региону, а не полнотекст).
+func (s *Service) topBlock(ctx context.Context, q Query) ([]AdHit, error) {
+	res, err := s.docs.Search(ctx, search.AdsCollection, buildTopParams(q))
+	if err != nil {
+		return nil, err
+	}
+	return decodeHits(res.Hits), nil
 }
 
 // Facets возвращает фасетное распределение по тем же фильтрам (без выборки
@@ -153,6 +180,26 @@ func buildParams(q Query, facetsOnly bool) search.SearchParams {
 		p.PerPage = 1 // документы не нужны — только facet_counts
 	}
 	return p
+}
+
+// buildTopParams собирает запрос топ-блока: фильтры запроса плюс is_top:=true,
+// сортировка по промо-рангу, без учёта текста (q='*').
+func buildTopParams(q Query) search.SearchParams {
+	filter := buildFilter(q)
+	if filter != "" {
+		filter += " && is_top:=true"
+	} else {
+		filter = "is_top:=true"
+	}
+	return search.SearchParams{
+		Q:              "*",
+		QueryBy:        queryByFields,
+		QueryByWeights: queryByWeights,
+		FilterBy:       filter,
+		SortBy:         topSort,
+		Page:           1,
+		PerPage:        TopBlockSize,
+	}
 }
 
 // buildFilter собирает выражение filter_by из фильтров запроса. Строковые
@@ -235,21 +282,25 @@ func buildFacetBy(q Query) string {
 	return strings.Join(fields, ",")
 }
 
-// toResult проецирует ответ Typesense в результат поиска (нечитаемые документы
-// пропускаются).
+// toResult проецирует ответ Typesense в результат поиска.
 func toResult(res *search.SearchResult, q Query) Result {
-	out := Result{
+	return Result{
 		Found:   res.Found,
 		Page:    clampPage(q.Page),
 		PerPage: clampPerPage(q.PerPage),
-		Hits:    make([]AdHit, 0, len(res.Hits)),
+		Hits:    decodeHits(res.Hits),
 	}
-	for _, h := range res.Hits {
+}
+
+// decodeHits проецирует документы Typesense в попадания (нечитаемые пропускаются).
+func decodeHits(hits []search.Hit) []AdHit {
+	out := make([]AdHit, 0, len(hits))
+	for _, h := range hits {
 		var d adDocument
 		if err := json.Unmarshal(h.Document, &d); err != nil {
 			continue
 		}
-		out.Hits = append(out.Hits, d.toHit())
+		out = append(out, d.toHit())
 	}
 	return out
 }

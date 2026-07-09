@@ -1,13 +1,17 @@
-status_id: "20260709-210000"
+status_id: "20260709-213000"
 project: "Bozor"
 version: "1.0"
 
 current:
-  chapter: "4"                     # CHAPTER 4: Search
-  stage: "4.4"                     # STAGE 4.4: заглушка топ-блока (featured/TOP) в выдаче до Promotions
+  chapter: "5"                     # CHAPTER 5: Profiles, Favorites & Saved Searches
+  stage: "5.1"                     # STAGE 5.1: User/Profile-сервис
   status: "not_started"
 
 completed:
+  - stage_id: "4.4"
+    title: "Search: заглушка топ-блока (featured/TOP) в выдаче — место для промо-объявлений до Promotions (CHAPTER 8); CHAPTER 4 завершён"
+    completed_date: "2026-07-09"
+    evidence: "Топ-блок выдачи как заглушка до Promotions (ADR-026, ROADMAP 4.4; ротация «макс. 5 на категорию» — 8.6). app.Result += Top []AdHit; Service.Search на первой странице (clampPage==1) дополнительно запрашивает топ-блок отдельным запросом buildTopParams: фильтры основного запроса + is_top:=true, q='*' (топ-блок зависит от категории/региона/фильтров, не от текста — это врезка промо, не полнотекст), sort promotion_rank:desc,created_at:desc, per_page=TopBlockSize(5); на страницах >1 блок не запрашивается (Top пуст) — экономия round-trip и продуктовая семантика (промо-врезка вверху). decodeHits вынесен общим (основная выдача + топ-блок). transport: searchResponse += top []adHitDTO (omitempty-семантика непустого лишь на 1-й странице с TOP-объявлениями), toHitDTOs общий для hits/top. Индексатор/схема не менялись: is_top/promotion_rank уже в схеме (4.1), buildDoc пишет is_top (пока всегда false — промо появятся в CHAPTER 8), promotion_rank optional; блок пуст до Promotions. Feed Listing вне охвата (is_top живёт в Search-индексе; топ-блок ленты — 8.6). Тесты: unit app (buildTopParams: фильтр+is_top, q='*', promotion_rank sort, per_page=5, без фильтров→только is_top; Search топ-блок на 1-й странице — 2 запроса, последний с is_top; страница>1 — 1 запрос, Top пуст; нет TOP-объявлений→Top пуст) + transport (searchResponse содержит top c is_top) — go test PASS; golangci-lint 0 issues; gofmt чисто. Живая проверка (search пересобран, healthy, 3 объявления в индексе): (1) GET /api/v1/ads/search?q=* → \"top\":[] (промо ещё нет); (2) upsert в Typesense демо-документа is_top=true/promotion_rank=10/category=cars → поиск с category_id=cars вернул этот документ в \"top\":[{id:top-demo,is_top:true,...}] (топ-блок наполняется, фильтр по категории учтён); (3) page=2 → \"top\":[] (только первая страница); (4) удаление демо-документа → num_documents назад 3, \"top\":[] снова пуст. CHAPTER 4 (Search) DoD выполнен: API search-ads с фасетами/фильтрами/сортировкой, индекс консистентен с листингами, место для TOP-блока подготовлено"
   - stage_id: "4.3"
     title: "Search: публичный API поиска — GET /ads/search (полнотекст/typo, фильтры category/region/city/price/attrs, сортировки relevance/price/date/bumped/distance, гео, пагинация) + GET /ads/search/facets; разведение маршрута в gateway"
     completed_date: "2026-07-09"
@@ -107,8 +111,9 @@ completed:
     evidence: "services/location (модуль bozor/services/location в go.work). Миграции: 00001 схема (regions: id smallint PK, slug UNIQUE, name_uz/name_ru, lat/lon, sort_order; cities: id PK, region_id FK ON DELETE CASCADE, slug UNIQUE, имена/гео/sort, индекс по region_id,sort_order) + 00002 идемпотентный сид (ADR-007, ON CONFLICT DO UPDATE): 14 первичных регионов (12 областей + г.Ташкент + Респ. Каракалпакстан) и 56 городов/районов с реальными координатами WGS84 — включая 12 районов Ташкента и по 2–4 города на регион (апострофы в узбекских названиях экранированы: Farg'ona, Qo'qon, Qoraqalpog'iston и т.д.). Слой: domain (Region/City, lat/lon *float64, ErrRegionNotFound), repo (Regions/CitiesByRegion/RegionExists через pgx, ORDER BY sort_order), app (Service; Cities → 404 при несуществующем регионе, пустой список = регион без городов), transport (chi + middleware pkg/shared, GET /api/v1/locations/regions, GET /api/v1/locations/regions/{id}/cities; 422 на нечисловой id). Config: только DSN (app→PgBouncer, migrate→Postgres напрямую, ADR-013). Миграции при старте через pkg/shared/migrate. Dockerfile build-local go.work → distroless nonroot, healthcheck /location -health. Compose: сервис location + dev-порт 8082 + scrape-job prometheus. Тесты: unit (config DSN, transport regions/cities/404/422/not-found) + integration на testcontainers postgres (14 регионов, 56 городов, 12 районов Ташкента, апостроф Farg'ona, RegionExists, пустой список для чужого региона) — go test -tags=integration PASS (6.7s); golangci-lint 0 issues (default+integration). Живая проверка (15 контейнеров): миграции applied=2, рестарт→applied=0 (идемпотентно); /readyz ready; напрямую и через gateway (routing /api/v1/locations→location): 14 регионов (первый — г.Ташкент), 12 районов Ташкента, апостроф Farg'ona корректен, Самарканд/Каттакурган/Ургут; 404 неизвестный регион, 422 нечисловой id; Prometheus up{job=location}=1"
 
 next_actions:
-  - "Stage 4.4: заглушка топ-блока featured/TOP в выдаче до Promotions (CHAPTER 8) — is_top/promotion_rank в схеме уже есть; приподнять TOP-объявления в выдаче/отдельным блоком, наполнение промо — заглушка"
-  - "CHAPTER 5 (Profiles/Favorites/SavedSearches): 5.1 User/Profile-сервис"
+  - "Stage 5.1: User/Profile-сервис — таблицы profiles (user_type individual/business, город, видимость телефона), notification_prefs, user_ratings_cache; API GET/PATCH /me, GET /users/{id}, GET/PUT /me/notification-prefs; потребление bozor.user.created"
+  - "Stage 5.2: Favorites — избранное пользователя"
+  - "Stage 5.3: SavedSearches — сохранённые поиски с алертами (переиспользуют Query/фильтры Search 4.3)"
 
 decisions:                         # краткие ссылки; полные ADR — в DECISIONS.md
   - decision: "Брокер — NATS JetStream (не Kafka) ради лёгкости на Compose"
@@ -183,6 +188,10 @@ decisions:                         # краткие ссылки; полные A
     rationale: "Публичный контракт GET /ads/search[/facets] не зависит от движка (замена Typesense не трогает transport); значения строковых фильтров в бэктиках + имена динамических полей attrs.<slug> санитизируются [a-z0-9_-] — защита от инъекции в filter_by; ошибка движка→503 без утечки деталей; в gateway chi отдаёт приоритет статическому /api/v1/ads/search над /api/v1/ads (listing), лишний /api/v1/search удалён"
     date: "2026-07-09"
     alternatives: ["Строить запрос Typesense прямо в transport", "Отдельный поддомен/сервис-хост для поиска", "Разведение по порядку регистрации маршрутов"]
+  - decision: "Топ-блок выдачи — отдельное поле top в ответе поиска, наполняется отдельным запросом is_top на первой странице; заглушка до Promotions (ADR-026)"
+    rationale: "Контракт получает место под featured/TOP уже сейчас — CHAPTER 8 лишь начнёт проставлять is_top/promotion_rank (в схеме с 4.1), API не меняется; top — отдельный запрос (фильтры запроса + is_top:=true, q='*' — врезка по категории/региону, не полнотекст; sort promotion_rank:desc), только на 1-й странице (промо-врезка вверху, экономия round-trip); пока is_top=false везде → блок пуст"
+    date: "2026-07-09"
+    alternatives: ["Подмешивать TOP в основную выдачу ранжированием", "Отдельный эндпоинт /ads/top", "Ждать CHAPTER 8 без задела в контракте"]
 
 open_questions: []
 
@@ -199,10 +208,10 @@ tech_stack:
   deploy: ["Docker Compose", "nginx"]
 
 metrics:
-  completed_stages: 24
+  completed_stages: 25
   total_stages: 52
-  completion_percentage: 46
-  estimated_remaining_stages: 28
-  chapters_completed: ["0", "1", "2", "3"]   # CHAPTER 0-3 завершены; CHAPTER 4 (Search) в работе — 4.1 (каркас+схема) + 4.2 (индексатор+reindex) + 4.3 (API поиска+facets) готовы; осталась 4.4 (заглушка топ-блока)
+  completion_percentage: 48
+  estimated_remaining_stages: 27
+  chapters_completed: ["0", "1", "2", "3", "4"]   # CHAPTER 0-4 завершены (4: Search — схема+индексатор+API+facets+заглушка топ-блока); следующая — CHAPTER 5 (Profiles/Favorites/SavedSearches)
 
 notes: "Backend-only, фронтенда нет. Целевая нагрузка: десятки тысяч DAU. Автономный режим работы подтверждён заказчиком. Коммиты — от имени baxromsafarov. Окружение: Windows 11, Go 1.26.4, Docker Desktop 29.2.1 + Compose v5, golangci-lint 2.12.2, goose, buf. Нюанс: локально go test без -race (нет cgo на Windows); -race выполняется в CI на Ubuntu. goconst min-occurrences=5. Инфра-нюансы (Stage 0.3): postgres:18 монтирует /var/lib/postgresql (не .../data); healthcheck typesense — через bash /dev/tcp (нет curl/wget/nc в образе). Локальный .env создаётся из .env.example (gitignore)."
