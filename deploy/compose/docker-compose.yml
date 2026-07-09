@@ -593,6 +593,40 @@ services:
       retries: 12
     networks: [bozor]
 
+  # ---------- moderation: авто-модерация + очередь ----------
+  moderation:
+    build:
+      context: ../..
+      dockerfile: services/moderation/Dockerfile
+    environment:
+      MODERATION_ADDR: ":8080"
+      APP_ENV: ${APP_ENV}
+      LOG_LEVEL: ${LOG_LEVEL}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_HOST: ${POSTGRES_HOST}
+      POSTGRES_PORT: ${POSTGRES_PORT}
+      PGBOUNCER_HOST: ${PGBOUNCER_HOST}
+      PGBOUNCER_PORT: ${PGBOUNCER_PORT}
+      NATS_URL: ${NATS_URL}                     # consume bozor.ad.created|updated / publish bozor.ad.approved
+      LISTING_INTERNAL_URL: http://listing-ads:8080  # авто-проверки читают объявление целиком
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      pgbouncer:
+        condition: service_healthy
+      nats:                  # consume bozor.ad.created|updated / publish bozor.ad.approved
+        condition: service_healthy
+      tempo:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "/moderation", "-health"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    networks: [bozor]
+
   # ---------- nginx: edge (TLS, LB) перед API Gateway ----------
   nginx:
     image: nginx:1.29-alpine
