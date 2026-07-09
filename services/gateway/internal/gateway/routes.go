@@ -19,9 +19,12 @@ var Routes = []Route{
 	{Prefix: "/api/v1/categories", Service: "catalog"},
 	{Prefix: "/api/v1/attributes", Service: "catalog"},
 	{Prefix: "/api/v1/locations", Service: "location"},
+	// Поиск — более специфичный префикс, чем /api/v1/ads (Listing): chi отдаёт
+	// приоритет статическому сегменту, поэтому /ads/search уходит в search, а
+	// /ads и /ads/{id} — в listing-ads.
+	{Prefix: "/api/v1/ads/search", Service: "search"},
 	{Prefix: "/api/v1/ads", Service: "listing-ads"},
 	{Prefix: "/api/v1/media", Service: "media"},
-	{Prefix: "/api/v1/search", Service: "search"},
 	{Prefix: "/api/v1/favorites", Service: "favorites-savedsearch"},
 	{Prefix: "/api/v1/saved-searches", Service: "favorites-savedsearch"},
 	{Prefix: "/api/v1/chat", Service: "chat"},

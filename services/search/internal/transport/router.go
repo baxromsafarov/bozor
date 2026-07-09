@@ -1,5 +1,5 @@
-// Package transport собирает HTTP-слой Search-сервиса. В Stage 4.1 — только
-// служебные эндпоинты; API поиска (GET /api/v1/ads/search) добавляется в 4.3.
+// Package transport собирает HTTP-слой Search-сервиса: служебные эндпоинты и
+// публичный API поиска (GET /api/v1/ads/search[/facets], Stage 4.3).
 package transport
 
 import (
@@ -18,6 +18,7 @@ const serviceName = "search"
 // Deps — зависимости для сборки роутера Search-сервиса.
 type Deps struct {
 	Log            *slog.Logger
+	Search         Searcher
 	ReadyChecks    map[string]httpx.Check
 	MetricsHandler http.Handler
 }
@@ -36,6 +37,13 @@ func NewRouter(d Deps) http.Handler {
 	r.Get("/readyz", httpx.ReadyHandler(d.ReadyChecks))
 	if d.MetricsHandler != nil {
 		r.Handle("/metrics", d.MetricsHandler)
+	}
+
+	// Публичный API поиска (полный путь с /api/v1 — версионирование сервисом).
+	if d.Search != nil {
+		sh := NewSearchHandler(d.Search, d.Log)
+		r.Get("/api/v1/ads/search", sh.Search)
+		r.Get("/api/v1/ads/search/facets", sh.Facets)
 	}
 
 	notFound := func(w http.ResponseWriter, req *http.Request) {

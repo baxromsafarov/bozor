@@ -20,6 +20,7 @@ import (
 	"bozor/pkg/shared/natsx"
 	"bozor/pkg/shared/otelx"
 
+	"bozor/services/search/internal/app"
 	"bozor/services/search/internal/config"
 	"bozor/services/search/internal/indexer"
 	"bozor/services/search/internal/listingclient"
@@ -119,6 +120,7 @@ func run(reindex bool) error {
 
 	router := transport.NewRouter(transport.Deps{
 		Log:            log,
+		Search:         app.NewService(client),
 		MetricsHandler: metricsHandler,
 		ReadyChecks: map[string]httpx.Check{
 			"typesense": client.Health,

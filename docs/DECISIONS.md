@@ -912,4 +912,41 @@ Read-модель Search (ADR-023) должна наполняться из об
 
 ---
 
+## ADR-025: API поиска — app-слой строит запрос Typesense за интерфейсом, санитизация фильтров, разведение маршрута /api/v1/ads/search в gateway
+
+- **Статус:** accepted
+- **Дата:** 2026-07-09
+- **Автор:** AI-инженер, по согласованию с ТЗ (ARCHITECTURE §4.7; ROADMAP Stage 4.3)
+
+### Контекст
+
+Поверх наполняемой read-модели (ADR-023/024) нужен публичный контракт поиска: `GET /api/v1/ads/search` (полнотекст uz/ru с typo-tolerance, фильтры категория/регион/город/цена/атрибуты, сортировки релевантность/цена/дата/bumped/дистанция, пагинация, гео) и `GET /api/v1/ads/search/facets`. Три вопроса требовали решения: (1) где строить запрос Typesense, (2) как безопасно собирать `filter_by` из пользовательского ввода, (3) как развести публичный путь `/api/v1/ads/search` от префикса Listing `/api/v1/ads` в gateway (зафиксировано в ADR-024 как долг Stage 4.3).
+
+### Рассмотренные варианты
+
+**(1) Слой построения запроса.**
+- **A. Прикладной `app`-слой за интерфейсом `Docs` (выбрано).** `transport` парсит query→доменный `Query`; `app` переводит `Query` в `search.SearchParams` (filter_by/sort_by/facet_by) и проецирует результат в доменные `AdHit`/`Facet`; `search.Client.Search` — только HTTP к Typesense. Публичный контракт не зависит от движка: замена Typesense (OpenSearch, PG FTS) не трогает transport и тесты (buildParams/buildFilter/buildSort покрыты юнитами без сети). Согласуется с ADR-022 (слой поиска за интерфейсом).
+- **B. Строить запрос Typesense прямо в transport.** Отклонён: привязывает HTTP-контракт к движку, дублирует сборку в хендлерах, труднее тестировать сборку фильтров изолированно.
+
+**(2) Безопасность `filter_by`.** Typesense filter_by — это выражение с операторами (`&&`, `:=`, `>=`, `:()`), собираемое из пользовательских значений. Решение: строковые значения оборачиваются в бэктики (точное совпадение, безопасно к пробелам/спецсимволам), а сами бэктики вырезаются из значения (нельзя выйти из литерала); имена динамических полей `attrs.<slug>` санитизируются до `[a-z0-9_-]` (слаг не может внести оператор/поле). Числа форматируются через strconv. Мусорные query-параметры парсятся лениво (→0/nil), поиск устойчив к шуму. Ошибка движка отдаётся как `503 search_unavailable` без утечки деталей Typesense наружу.
+
+**(3) Разведение маршрута в gateway.**
+- **A. Более специфичный префикс `/api/v1/ads/search` → search перед `/api/v1/ads` → listing-ads (выбрано).** chi (radix-trie) отдаёт приоритет статическому сегменту `search` над wildcard `/ads/*`, независимо от порядка регистрации; устаревший `/api/v1/search` удалён. Публичный путь совпадает с ARCHITECTURE §4.7 (`GET /api/v1/ads/search`).
+- **B. Отдельный хост/поддомен для поиска.** Отклонён: избыточно для монолитного compose; ломает единый `/api/v1/*` контракт.
+- **C. Разведение по порядку регистрации.** Отклонён: хрупко; chi и так решает по специфичности, порядок не нужен.
+
+### Детали решения
+
+- `search.Client.Search` (GET /collections/ads/documents/search): собирает `q/query_by/query_by_weights/filter_by/sort_by/facet_by/max_facet_values/page/per_page`, декодирует `found/hits/facet_counts`.
+- `app`: `Query`→`buildParams` (q='*' при пустом тексте, query_by=`title,description` веса `2,1`), `buildFilter` (бэктики+санитизация), `buildSort` (relevance без текста→дата), `Facets` (facet_by=category_id,region_id,city_id,currency + attrs.<slug>, per_page=1, max_facet_values=50); `clampPage`(≥1)/`clampPerPage`(20/100).
+- `transport`: `GET /api/v1/ads/search[/facets]` (публично), `parseQuery` (attr.<slug>=value→Attrs, facets=csv, lat+lng[+radius_km]→Geo), DTO `searchResponse`/`facetsResponse`.
+- gateway: `Routes` += `/api/v1/ads/search`→search (перед `/api/v1/ads`), удалён `/api/v1/search`.
+
+### Последствия
+
+- Публичный поиск работает через gateway и напрямую; движок изолирован. Проверено вживую (3 активных объявления в индексе): полнотекст `q=feed`→found=2 (префикс токена), typo `q=feod`→found=2 (`q=fed`<4 симв.→0 — порог Typesense `min_len_1typo=4`, ожидаемо); фильтры region_id/price-диапазон/attr.brand; сортировки price_asc/desc (1/200/500); фасеты по category/region/currency/attrs.brand (toyota:2, other:1); разведение маршрутов: `/api/v1/ads/search`→search (поле `found`), `/api/v1/ads/{id}` и лента→listing (`user_id`/`limit`).
+- **Условия пересмотра:** при мультиязычных полях — раздельные `title_uz/title_ru`/locale (сейчас одно поле, двуязычие токенизацией); фасеты атрибутов сейчас запрашиваются клиентом (`facets=`) — при необходимости строить из эффективного набора Catalog; синонимы/ранжирование промо (is_top/promotion_rank) — Stage 4.4 и CHAPTER 8.
+
+---
+
 *Конец журнала. Новые решения добавляются в конец с очередным номером ADR.*

@@ -1,13 +1,17 @@
-status_id: "20260709-154700"
+status_id: "20260709-210000"
 project: "Bozor"
 version: "1.0"
 
 current:
   chapter: "4"                     # CHAPTER 4: Search
-  stage: "4.3"                     # STAGE 4.3: API поиска (GET /ads/search + facets)
+  stage: "4.4"                     # STAGE 4.4: заглушка топ-блока (featured/TOP) в выдаче до Promotions
   status: "not_started"
 
 completed:
+  - stage_id: "4.3"
+    title: "Search: публичный API поиска — GET /ads/search (полнотекст/typo, фильтры category/region/city/price/attrs, сортировки relevance/price/date/bumped/distance, гео, пагинация) + GET /ads/search/facets; разведение маршрута в gateway"
+    completed_date: "2026-07-09"
+    evidence: "Публичный API поиска над read-моделью Typesense (ADR-025, ARCHITECTURE §4.7). search.Client += Search (GET /collections/ads/documents/search: собирает q/query_by/query_by_weights/filter_by/sort_by/facet_by/max_facet_values/page/per_page из SearchParams, декодирует found/hits[document,text_match]/facet_counts; non-200→ошибка). app-слой (изолирует движок за интерфейсом Docs, ADR-022): Query (Text/CategoryID/RegionID/CityID/PriceMin/PriceMax/Currency/Attrs/Sort/Geo/Page/PerPage/AttrFacets) → buildParams: q='*' при пустом тексте, query_by=title,description веса 2,1; buildFilter (category_id/currency/attrs.<slug> в бэктиках — точное совпадение и защита от пробелов; region_id/city_id/price>=<= числами; attrs детерминированы сортировкой ключей; гео location:(lat,lng,R km); имена полей attrs санитизируются [a-z0-9_-], бэктики вырезаются из значений — защита от инъекции в filter_by); buildSort (price_asc/desc, date=created_at:desc, bumped=bumped_at:desc, distance=location(lat,lng):asc при гео; relevance/пусто → _text_match:desc,created_at:desc с текстом, created_at:desc без — релевантность без текста бессмысленна); Facets (facet_by=category_id,region_id,city_id,currency + attrs.<slug> из AttrFacets, per_page=1, max_facet_values=50, те же фильтры); toResult/toFacets (проекция документа→AdHit конверсией типов, нечитаемые пропускаются); clampPage(>=1)/clampPerPage(20 деф/100 макс). transport: GET /api/v1/ads/search и /api/v1/ads/search/facets (публично), parseQuery (лениво: мусорные числа→0/nil, attr.<slug>=value→Attrs, facets=csv→AttrFacets, lat+lng[+radius_km]→Geo, неполная пара→без гео), DTO searchResponse{hits,found,page,per_page}/facetsResponse; ошибка движка→503 search_unavailable (детали Typesense наружу не текут). router+main: app.NewService(client) в Deps. gateway routes: добавлен более специфичный /api/v1/ads/search → search перед /api/v1/ads → listing-ads (chi отдаёт приоритет статическому сегменту; удалён устаревший /api/v1/search). Тесты: unit search.Search (httptest: сборка query, декод hits/facets, пропуск пустых optional, non-200→ошибка) + app (buildParams фильтры/сорт/пагинация, пустой текст→дата, режимы сорта, гео-радиус, санитизация слага и вырезание бэктика, clamp, Search маппинг hits/пропуск нечитаемых, Facets маппинг) + transport (parseQuery все параметры/лениво к мусору, Search/Facets happy, ошибка→503) + gateway (TestRoutes_AdsSearchPrecedence: /ads/search и /ads/search/facets→search, /ads и /ads/{id}→listing-ads на раздельных апстримах) — go test PASS; golangci-lint 0 issues (исправлен S1016 — конверсия adDocument→AdHit); gofmt чисто; go work sync — все 8 модулей зелёные. Живая проверка (search+gateway пересобраны, healthy; в индексе 3 активных объявления): через gateway :8080 и напрямую :8086 — полнотекст q=feed→found=2 (префикс по токену feed1/feed2); typo q=feod (4 симв., 1 замена)→found=2 (typo-tolerance; q=fed<4 симв.→0 — порог min_len_1typo=4 Typesense, ожидаемо); фильтры region_id=1→2 объявления, price_min=300&price_max=600→1, attr.brand=toyota→found=2; сорт price_asc→1/200/500, price_desc→500/200/1; facets?facets=brand → category_id/region_id(1:2,2:1)/city_id/currency(UZS:3)/attrs.brand(toyota:2,other:1); разведение маршрутов: /api/v1/ads/search→search (поле found, нет user_id), /api/v1/ads/{id}→listing (user_id/phone_display), /api/v1/ads лента→listing (limit/offset)"
   - stage_id: "4.2"
     title: "Search: индексатор на событиях (bozor.ad.* → Typesense) + reindex — событие как триггер, чтение истины из Listing"
     completed_date: "2026-07-09"
@@ -103,8 +107,7 @@ completed:
     evidence: "services/location (модуль bozor/services/location в go.work). Миграции: 00001 схема (regions: id smallint PK, slug UNIQUE, name_uz/name_ru, lat/lon, sort_order; cities: id PK, region_id FK ON DELETE CASCADE, slug UNIQUE, имена/гео/sort, индекс по region_id,sort_order) + 00002 идемпотентный сид (ADR-007, ON CONFLICT DO UPDATE): 14 первичных регионов (12 областей + г.Ташкент + Респ. Каракалпакстан) и 56 городов/районов с реальными координатами WGS84 — включая 12 районов Ташкента и по 2–4 города на регион (апострофы в узбекских названиях экранированы: Farg'ona, Qo'qon, Qoraqalpog'iston и т.д.). Слой: domain (Region/City, lat/lon *float64, ErrRegionNotFound), repo (Regions/CitiesByRegion/RegionExists через pgx, ORDER BY sort_order), app (Service; Cities → 404 при несуществующем регионе, пустой список = регион без городов), transport (chi + middleware pkg/shared, GET /api/v1/locations/regions, GET /api/v1/locations/regions/{id}/cities; 422 на нечисловой id). Config: только DSN (app→PgBouncer, migrate→Postgres напрямую, ADR-013). Миграции при старте через pkg/shared/migrate. Dockerfile build-local go.work → distroless nonroot, healthcheck /location -health. Compose: сервис location + dev-порт 8082 + scrape-job prometheus. Тесты: unit (config DSN, transport regions/cities/404/422/not-found) + integration на testcontainers postgres (14 регионов, 56 городов, 12 районов Ташкента, апостроф Farg'ona, RegionExists, пустой список для чужого региона) — go test -tags=integration PASS (6.7s); golangci-lint 0 issues (default+integration). Живая проверка (15 контейнеров): миграции applied=2, рестарт→applied=0 (идемпотентно); /readyz ready; напрямую и через gateway (routing /api/v1/locations→location): 14 регионов (первый — г.Ташкент), 12 районов Ташкента, апостроф Farg'ona корректен, Самарканд/Каттакурган/Ургут; 404 неизвестный регион, 422 нечисловой id; Prometheus up{job=location}=1"
 
 next_actions:
-  - "Stage 4.3: API поиска — GET /ads/search (полнотекст uz/ru, typo, фильтры category/region/city/price/attrs-фасеты, сортировки relevance/price/date, пагинация, гео) + GET /ads/search/facets; развести маршрут /api/v1/ads/search от Listing в gateway (более специфичный upstream)"
-  - "Stage 4.4: заглушка топ-блока featured/TOP в выдаче до Promotions (CHAPTER 8)"
+  - "Stage 4.4: заглушка топ-блока featured/TOP в выдаче до Promotions (CHAPTER 8) — is_top/promotion_rank в схеме уже есть; приподнять TOP-объявления в выдаче/отдельным блоком, наполнение промо — заглушка"
   - "CHAPTER 5 (Profiles/Favorites/SavedSearches): 5.1 User/Profile-сервис"
 
 decisions:                         # краткие ссылки; полные ADR — в DECISIONS.md
@@ -176,6 +179,10 @@ decisions:                         # краткие ссылки; полные A
     rationale: "Минимальные события не несут описание/атрибуты/гео; читая истину из Listing на каждое событие, индекс сводится к текущему состоянию (устойчиво к переупорядочиванию), идемпотентно по id документа (без inbox); одна ветка построения документа для live и reindex; внутренний read Listing — HTTP (без учёта просмотра), отступление от gRPC-ADR-019 зафиксировано"
     date: "2026-07-09"
     alternatives: ["Обогатить события (event-carried state)", "Индексатор с БД/inbox", "gRPC Search→Listing"]
+  - decision: "API поиска — app-слой строит запрос Typesense за интерфейсом Docs, фильтры санитизируются, маршрут /api/v1/ads/search разведён от Listing более специфичным префиксом (ADR-025)"
+    rationale: "Публичный контракт GET /ads/search[/facets] не зависит от движка (замена Typesense не трогает transport); значения строковых фильтров в бэктиках + имена динамических полей attrs.<slug> санитизируются [a-z0-9_-] — защита от инъекции в filter_by; ошибка движка→503 без утечки деталей; в gateway chi отдаёт приоритет статическому /api/v1/ads/search над /api/v1/ads (listing), лишний /api/v1/search удалён"
+    date: "2026-07-09"
+    alternatives: ["Строить запрос Typesense прямо в transport", "Отдельный поддомен/сервис-хост для поиска", "Разведение по порядку регистрации маршрутов"]
 
 open_questions: []
 
@@ -192,10 +199,10 @@ tech_stack:
   deploy: ["Docker Compose", "nginx"]
 
 metrics:
-  completed_stages: 23
+  completed_stages: 24
   total_stages: 52
-  completion_percentage: 44
-  estimated_remaining_stages: 29
-  chapters_completed: ["0", "1", "2", "3"]   # CHAPTER 0-3 завершены; CHAPTER 4 (Search) в работе — 4.1 (каркас+схема) + 4.2 (индексатор+reindex) готовы
+  completion_percentage: 46
+  estimated_remaining_stages: 28
+  chapters_completed: ["0", "1", "2", "3"]   # CHAPTER 0-3 завершены; CHAPTER 4 (Search) в работе — 4.1 (каркас+схема) + 4.2 (индексатор+reindex) + 4.3 (API поиска+facets) готовы; осталась 4.4 (заглушка топ-блока)
 
 notes: "Backend-only, фронтенда нет. Целевая нагрузка: десятки тысяч DAU. Автономный режим работы подтверждён заказчиком. Коммиты — от имени baxromsafarov. Окружение: Windows 11, Go 1.26.4, Docker Desktop 29.2.1 + Compose v5, golangci-lint 2.12.2, goose, buf. Нюанс: локально go test без -race (нет cgo на Windows); -race выполняется в CI на Ubuntu. goconst min-occurrences=5. Инфра-нюансы (Stage 0.3): postgres:18 монтирует /var/lib/postgresql (не .../data); healthcheck typesense — через bash /dev/tcp (нет curl/wget/nc в образе). Локальный .env создаётся из .env.example (gitignore)."
