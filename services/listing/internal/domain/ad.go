@@ -11,6 +11,7 @@ import (
 var (
 	ErrAdNotFound          = errors.New("объявление не найдено")
 	ErrInvalidTransition   = errors.New("недопустимый переход статуса")
+	ErrNotEditable         = errors.New("объявление нельзя редактировать в текущем статусе")
 	ErrEmptyTitle          = errors.New("пустой заголовок")
 	ErrTitleTooLong        = errors.New("заголовок слишком длинный")
 	ErrNegativePrice       = errors.New("отрицательная цена")
@@ -70,6 +71,26 @@ func (s Status) Valid() bool {
 		return true
 	}
 	return false
+}
+
+// Editable сообщает, можно ли редактировать объявление в статусе s. Терминальные
+// (sold/expired/archived) и заблокированные править нельзя; правка активного по
+// ключевым полям отправляет его на повторную модерацию (active→pending).
+func (s Status) Editable() bool {
+	switch s {
+	case StatusDraft, StatusPending, StatusRejected, StatusActive:
+		return true
+	}
+	return false
+}
+
+// FeedFilter — параметры ленты активных объявлений (Stage 3.6).
+type FeedFilter struct {
+	CategoryID string // uuid; пусто — любая категория
+	RegionID   int16  // 0 — любой регион
+	Sort       string // recent (по умолч.) | price_asc | price_desc
+	Limit      int
+	Offset     int
 }
 
 // StatusUpdate описывает переход статуса объявления и опциональные отметки

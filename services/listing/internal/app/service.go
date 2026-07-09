@@ -28,7 +28,17 @@ type Store interface {
 	CreateWithEvent(ctx context.Context, a domain.Ad, ev events.Envelope) error
 	GetByID(ctx context.Context, id string) (domain.Ad, error)
 	TransitionWithEvent(ctx context.Context, adID string, upd domain.StatusUpdate, ev events.Envelope) error
+	UpdateWithEvent(ctx context.Context, a domain.Ad, ev events.Envelope) error
+	DeleteWithEvent(ctx context.Context, adID string, ev events.Envelope) error
+	ListActive(ctx context.Context, f domain.FeedFilter) ([]domain.Ad, error)
+	ListByUser(ctx context.Context, userID, status string, limit, offset int) ([]domain.Ad, error)
 }
+
+// Ограничения пагинации ленты и списка «мои объявления».
+const (
+	defaultPageLimit = 20
+	maxPageLimit     = 100
+)
 
 // CatalogValidator отдаёт эффективный набор атрибутов категории из Catalog
 // (реализуется gRPC-клиентом). Возвращает ErrCategoryNotFound, если категории нет.
@@ -151,6 +161,160 @@ func (s *Service) recordView(ctx context.Context, ad *domain.Ad) {
 		return
 	}
 	ad.ViewsCount += buffered
+}
+
+// UpdateInput — частичное изменение объявления (nil-поля не меняются).
+type UpdateInput struct {
+	Title        *string
+	Description  *string
+	Price        *int64
+	Currency     *string
+	CategoryID   *string
+	RegionID     *int16
+	CityID       *int64
+	Lat          *float64
+	Lng          *float64
+	PhoneDisplay *bool
+	Attributes   *[]domain.AdAttributeValue
+	Images       *[]domain.AdImage
+}
+
+// Update изменяет объявление владельца: применяет заданные поля, ре-валидирует
+// значения атрибутов против (возможно новой) категории Catalog и, если правка
+// затронула ключевые поля активного объявления (заголовок, описание, цена,
+// категория, атрибуты, изображения), отправляет его на повторную модерацию
+// (active → pending). Публикует bozor.ad.updated. Терминальные/заблокированные
+// править нельзя (ErrNotEditable).
+func (s *Service) Update(ctx context.Context, adID, userID string, in UpdateInput) (domain.Ad, error) {
+	ad, err := s.store.GetByID(ctx, adID)
+	if err != nil {
+		return domain.Ad{}, err
+	}
+	if ad.UserID != userID {
+		return domain.Ad{}, ErrForbidden
+	}
+	if !ad.Status.Editable() {
+		return domain.Ad{}, domain.ErrNotEditable
+	}
+
+	keyChanged := applyUpdate(&ad, in)
+
+	if err := ad.ValidateCore(); err != nil {
+		return domain.Ad{}, err
+	}
+	if err := domain.ValidateImages(ad.Images); err != nil {
+		return domain.Ad{}, err
+	}
+	specs, err := s.catalog.EffectiveAttributes(ctx, ad.CategoryID)
+	if err != nil {
+		return domain.Ad{}, err // включая ErrCategoryNotFound
+	}
+	if err := domain.ValidateAttributes(specs, ad.Attributes); err != nil {
+		return domain.Ad{}, err
+	}
+
+	// Правка ключевых полей активного объявления → повторная модерация.
+	if keyChanged && ad.Status == domain.StatusActive {
+		ad.Status = domain.StatusPending
+	}
+	ad.UpdatedAt = time.Now().UTC()
+
+	ev, err := events.New(events.SubjectAdUpdated, source, NewAdEvent(ad))
+	if err != nil {
+		return domain.Ad{}, fmt.Errorf("app: сборка события: %w", err)
+	}
+	if err := s.store.UpdateWithEvent(ctx, ad, ev); err != nil {
+		return domain.Ad{}, err
+	}
+	return ad, nil
+}
+
+// applyUpdate применяет заданные поля к объявлению и сообщает, изменились ли
+// ключевые поля (влияющие на повторную модерацию): заголовок, описание, цена,
+// категория, атрибуты, изображения.
+func applyUpdate(ad *domain.Ad, in UpdateInput) bool {
+	keyChanged := false
+	if in.Title != nil && *in.Title != ad.Title {
+		ad.Title, keyChanged = *in.Title, true
+	}
+	if in.Description != nil && *in.Description != ad.Description {
+		ad.Description, keyChanged = *in.Description, true
+	}
+	if in.Price != nil && *in.Price != ad.Price {
+		ad.Price, keyChanged = *in.Price, true
+	}
+	if in.CategoryID != nil && *in.CategoryID != ad.CategoryID {
+		ad.CategoryID, keyChanged = *in.CategoryID, true
+	}
+	if in.Attributes != nil {
+		ad.Attributes, keyChanged = *in.Attributes, true
+	}
+	if in.Images != nil {
+		ad.Images, keyChanged = *in.Images, true
+	}
+	// Неключевые поля — без повторной модерации.
+	if in.Currency != nil {
+		ad.Currency = *in.Currency
+	}
+	if in.RegionID != nil {
+		ad.RegionID = *in.RegionID
+	}
+	if in.CityID != nil {
+		ad.CityID = in.CityID
+	}
+	if in.Lat != nil {
+		ad.Lat = in.Lat
+	}
+	if in.Lng != nil {
+		ad.Lng = in.Lng
+	}
+	if in.PhoneDisplay != nil {
+		ad.PhoneDisplay = *in.PhoneDisplay
+	}
+	return keyChanged
+}
+
+// Delete удаляет объявление владельца и публикует bozor.ad.deleted (Search/Media
+// снимают индекс/освобождают медиа). Доступно только владельцу.
+func (s *Service) Delete(ctx context.Context, adID, userID string) error {
+	ad, err := s.store.GetByID(ctx, adID)
+	if err != nil {
+		return err
+	}
+	if ad.UserID != userID {
+		return ErrForbidden
+	}
+	ev, err := events.New(events.SubjectAdDeleted, source, NewAdEvent(ad))
+	if err != nil {
+		return fmt.Errorf("app: сборка события: %w", err)
+	}
+	return s.store.DeleteWithEvent(ctx, adID, ev)
+}
+
+// Feed возвращает ленту активных объявлений с пагинацией и сортировкой.
+func (s *Service) Feed(ctx context.Context, f domain.FeedFilter) ([]domain.Ad, error) {
+	f.Limit, f.Offset = clampPage(f.Limit, f.Offset)
+	return s.store.ListActive(ctx, f)
+}
+
+// MyAds возвращает объявления пользователя (все или заданного статуса) с пагинацией.
+func (s *Service) MyAds(ctx context.Context, userID, status string, limit, offset int) ([]domain.Ad, error) {
+	limit, offset = clampPage(limit, offset)
+	return s.store.ListByUser(ctx, userID, status, limit, offset)
+}
+
+// clampPage приводит лимит/смещение к безопасным границам.
+func clampPage(limit, offset int) (int, int) {
+	if limit <= 0 {
+		limit = defaultPageLimit
+	}
+	if limit > maxPageLimit {
+		limit = maxPageLimit
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	return limit, offset
 }
 
 // SubmitForModeration отправляет объявление на модерацию (draft|rejected →

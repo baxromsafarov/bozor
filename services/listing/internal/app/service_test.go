@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"log/slog"
+	"strconv"
 	"testing"
 	"time"
 
@@ -15,15 +16,22 @@ import (
 	"bozor/services/listing/internal/domain"
 )
 
+func ptr[T any](v T) *T { return &v }
+
 func discardLogger() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
 
 type fakeStore struct {
-	created   *domain.Ad
-	events    []events.Envelope
-	getResult *domain.Ad // если задан — возвращается GetByID (для действий жизненного цикла)
-	getErr    error
-	lastUpd   domain.StatusUpdate // последний переход, переданный в TransitionWithEvent
-	transErr  error
+	created    *domain.Ad
+	events     []events.Envelope
+	getResult  *domain.Ad // если задан — возвращается GetByID (для действий жизненного цикла)
+	getErr     error
+	lastUpd    domain.StatusUpdate // последний переход, переданный в TransitionWithEvent
+	transErr   error
+	updated    *domain.Ad        // последнее объявление, переданное в UpdateWithEvent
+	deletedID  string            // id из DeleteWithEvent
+	list       []domain.Ad       // результат ListActive/ListByUser
+	feedFilter domain.FeedFilter // фильтр из ListActive
+	byUser     [4]string         // {userID, status, limit, offset} из ListByUser
 }
 
 func (f *fakeStore) CreateWithEvent(_ context.Context, a domain.Ad, ev events.Envelope) error {
@@ -52,6 +60,30 @@ func (f *fakeStore) TransitionWithEvent(_ context.Context, _ string, upd domain.
 	f.events = append(f.events, ev)
 	return nil
 }
+
+func (f *fakeStore) UpdateWithEvent(_ context.Context, a domain.Ad, ev events.Envelope) error {
+	f.updated = &a
+	f.events = append(f.events, ev)
+	return nil
+}
+
+func (f *fakeStore) DeleteWithEvent(_ context.Context, adID string, ev events.Envelope) error {
+	f.deletedID = adID
+	f.events = append(f.events, ev)
+	return nil
+}
+
+func (f *fakeStore) ListActive(_ context.Context, filter domain.FeedFilter) ([]domain.Ad, error) {
+	f.feedFilter = filter
+	return f.list, nil
+}
+
+func (f *fakeStore) ListByUser(_ context.Context, userID, status string, limit, offset int) ([]domain.Ad, error) {
+	f.byUser = [4]string{userID, status, itoa(limit), itoa(offset)}
+	return f.list, nil
+}
+
+func itoa(n int) string { return strconv.Itoa(n) }
 
 type fakeCatalog struct {
 	specs []domain.AttrSpec
@@ -245,6 +277,107 @@ func TestArchive_HappyPath(t *testing.T) {
 	assert.Equal(t, domain.StatusArchived, ad.Status)
 	require.Len(t, store.events, 1)
 	assert.Equal(t, events.SubjectAdUpdated, store.events[0].Type)
+}
+
+// updatableAd — объявление владельца в заданном статусе с валидными атрибутами.
+func updatableAd(status domain.Status) *domain.Ad {
+	return &domain.Ad{
+		ID: "ad-1", UserID: "user-1", CategoryID: "cat", Title: "BMW X5", Price: 100,
+		Currency: "UZS", RegionID: 1, Status: status,
+		Attributes: []domain.AdAttributeValue{{AttributeSlug: "brand", Value: "bmw"}},
+	}
+}
+
+func updateSvc(store Store) *Service {
+	return NewService(store, carsCatalog(), nil, 720*time.Hour, discardLogger())
+}
+
+func TestUpdate_ActiveKeyFieldTriggersRemoderation(t *testing.T) {
+	store := &fakeStore{getResult: updatableAd(domain.StatusActive)}
+	ad, err := updateSvc(store).Update(context.Background(), "ad-1", "user-1",
+		UpdateInput{Price: ptr(int64(200))})
+	require.NoError(t, err)
+	assert.Equal(t, domain.StatusPending, ad.Status, "правка цены активного → повторная модерация")
+	assert.Equal(t, int64(200), ad.Price)
+	require.NotNil(t, store.updated)
+	require.Len(t, store.events, 1)
+	assert.Equal(t, events.SubjectAdUpdated, store.events[0].Type)
+}
+
+func TestUpdate_ActiveNonKeyFieldKeepsActive(t *testing.T) {
+	store := &fakeStore{getResult: updatableAd(domain.StatusActive)}
+	ad, err := updateSvc(store).Update(context.Background(), "ad-1", "user-1",
+		UpdateInput{PhoneDisplay: ptr(false)})
+	require.NoError(t, err)
+	assert.Equal(t, domain.StatusActive, ad.Status, "неключевое поле не шлёт на модерацию")
+	assert.False(t, ad.PhoneDisplay)
+}
+
+func TestUpdate_DraftStaysDraft(t *testing.T) {
+	store := &fakeStore{getResult: updatableAd(domain.StatusDraft)}
+	ad, err := updateSvc(store).Update(context.Background(), "ad-1", "user-1",
+		UpdateInput{Title: ptr("BMW X6")})
+	require.NoError(t, err)
+	assert.Equal(t, domain.StatusDraft, ad.Status)
+	assert.Equal(t, "BMW X6", ad.Title)
+}
+
+func TestUpdate_WrongOwnerForbidden(t *testing.T) {
+	store := &fakeStore{getResult: updatableAd(domain.StatusActive)}
+	_, err := updateSvc(store).Update(context.Background(), "ad-1", "intruder", UpdateInput{Price: ptr(int64(1))})
+	assert.ErrorIs(t, err, ErrForbidden)
+}
+
+func TestUpdate_TerminalNotEditable(t *testing.T) {
+	store := &fakeStore{getResult: updatableAd(domain.StatusSold)}
+	_, err := updateSvc(store).Update(context.Background(), "ad-1", "user-1", UpdateInput{Title: ptr("X")})
+	assert.ErrorIs(t, err, domain.ErrNotEditable)
+}
+
+func TestUpdate_RevalidatesAttributes(t *testing.T) {
+	store := &fakeStore{getResult: updatableAd(domain.StatusDraft)}
+	bad := []domain.AdAttributeValue{{AttributeSlug: "brand", Value: "lada"}} // вне enum
+	_, err := updateSvc(store).Update(context.Background(), "ad-1", "user-1", UpdateInput{Attributes: &bad})
+	assert.ErrorIs(t, err, domain.ErrInvalidAttrValue)
+}
+
+func TestDelete_HappyPath(t *testing.T) {
+	store := &fakeStore{getResult: updatableAd(domain.StatusActive)}
+	err := updateSvc(store).Delete(context.Background(), "ad-1", "user-1")
+	require.NoError(t, err)
+	assert.Equal(t, "ad-1", store.deletedID)
+	require.Len(t, store.events, 1)
+	assert.Equal(t, events.SubjectAdDeleted, store.events[0].Type)
+}
+
+func TestDelete_WrongOwnerForbidden(t *testing.T) {
+	store := &fakeStore{getResult: updatableAd(domain.StatusActive)}
+	err := updateSvc(store).Delete(context.Background(), "ad-1", "intruder")
+	assert.ErrorIs(t, err, ErrForbidden)
+	assert.Empty(t, store.deletedID)
+}
+
+func TestFeed_ClampsLimit(t *testing.T) {
+	store := &fakeStore{list: []domain.Ad{{ID: "a"}}}
+	ads, err := updateSvc(store).Feed(context.Background(), domain.FeedFilter{Limit: 1000, CategoryID: "cat"})
+	require.NoError(t, err)
+	require.Len(t, ads, 1)
+	assert.Equal(t, maxPageLimit, store.feedFilter.Limit, "лимит ограничен максимумом")
+	assert.Equal(t, "cat", store.feedFilter.CategoryID)
+}
+
+func TestFeed_DefaultLimit(t *testing.T) {
+	store := &fakeStore{}
+	_, err := updateSvc(store).Feed(context.Background(), domain.FeedFilter{})
+	require.NoError(t, err)
+	assert.Equal(t, defaultPageLimit, store.feedFilter.Limit)
+}
+
+func TestMyAds_PassesParams(t *testing.T) {
+	store := &fakeStore{}
+	_, err := updateSvc(store).MyAds(context.Background(), "user-1", "active", 0, 5)
+	require.NoError(t, err)
+	assert.Equal(t, [4]string{"user-1", "active", strconv.Itoa(defaultPageLimit), "5"}, store.byUser)
 }
 
 func TestGet_RecordsViewAndAugments(t *testing.T) {

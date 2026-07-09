@@ -227,6 +227,124 @@ func (r *Repo) AddViews(ctx context.Context, counts map[string]int64) error {
 	return nil
 }
 
+// UpdateWithEvent обновляет изменяемые поля объявления, заменяет значения
+// атрибутов и изображения (replace-all) и кладёт событие в outbox — одной
+// транзакцией. Статус передаётся уже вычисленным приложением (правка активного
+// по ключевым полям → pending). ErrAdNotFound, если объявления нет.
+func (r *Repo) UpdateWithEvent(ctx context.Context, a domain.Ad, ev events.Envelope) error {
+	return pgxx.WithTx(ctx, r.pool, func(tx pgx.Tx) error {
+		tag, err := tx.Exec(ctx, `
+			UPDATE ads SET category_id=$2, title=$3, description=$4, price=$5, currency=$6,
+				region_id=$7, city_id=$8, lat=$9, lng=$10, status=$11, phone_display=$12, updated_at=now()
+			WHERE id=$1
+		`, a.ID, a.CategoryID, a.Title, a.Description, a.Price, a.Currency,
+			a.RegionID, a.CityID, a.Lat, a.Lng, string(a.Status), a.PhoneDisplay)
+		if err != nil {
+			return fmt.Errorf("repo: обновление объявления: %w", err)
+		}
+		if tag.RowsAffected() == 0 {
+			return domain.ErrAdNotFound
+		}
+		if _, err := tx.Exec(ctx, `DELETE FROM ad_attribute_values WHERE ad_id=$1`, a.ID); err != nil {
+			return fmt.Errorf("repo: очистка атрибутов: %w", err)
+		}
+		if err := insertAttributes(ctx, tx, a.ID, a.Attributes); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `DELETE FROM ad_images WHERE ad_id=$1`, a.ID); err != nil {
+			return fmt.Errorf("repo: очистка изображений: %w", err)
+		}
+		if err := insertImages(ctx, tx, a.ID, a.Images); err != nil {
+			return err
+		}
+		return outbox.Enqueue(ctx, tx, ev)
+	})
+}
+
+// DeleteWithEvent удаляет объявление (каскад на атрибуты/изображения) и
+// публикует bozor.ad.deleted одной транзакцией. ErrAdNotFound, если записи нет.
+func (r *Repo) DeleteWithEvent(ctx context.Context, adID string, ev events.Envelope) error {
+	return pgxx.WithTx(ctx, r.pool, func(tx pgx.Tx) error {
+		tag, err := tx.Exec(ctx, `DELETE FROM ads WHERE id=$1`, adID)
+		if err != nil {
+			return fmt.Errorf("repo: удаление объявления: %w", err)
+		}
+		if tag.RowsAffected() == 0 {
+			return domain.ErrAdNotFound
+		}
+		return outbox.Enqueue(ctx, tx, ev)
+	})
+}
+
+// ListActive возвращает ленту активных объявлений (без дочерних сущностей —
+// карточка ленты не требует полного набора атрибутов/изображений; детальный
+// GET отдаёт всё). Фильтры по категории/региону опциональны, сортировка —
+// по bumped_at/published_at (свежесть), либо по цене.
+func (r *Repo) ListActive(ctx context.Context, f domain.FeedFilter) ([]domain.Ad, error) {
+	conds := []string{"status = 'active'"}
+	args := []any{}
+	n := 1
+	if f.CategoryID != "" {
+		conds = append(conds, fmt.Sprintf("category_id = $%d::uuid", n))
+		args = append(args, f.CategoryID)
+		n++
+	}
+	if f.RegionID != 0 {
+		conds = append(conds, fmt.Sprintf("region_id = $%d", n))
+		args = append(args, f.RegionID)
+		n++
+	}
+	order := "COALESCE(bumped_at, published_at) DESC NULLS LAST"
+	switch f.Sort {
+	case "price_asc":
+		order = "price ASC"
+	case "price_desc":
+		order = "price DESC"
+	}
+	sql := `SELECT ` + adColumns + ` FROM ads WHERE ` + strings.Join(conds, " AND ") +
+		` ORDER BY ` + order + fmt.Sprintf(", id DESC LIMIT $%d OFFSET $%d", n, n+1)
+	args = append(args, f.Limit, f.Offset)
+	return r.queryAds(ctx, sql, args...)
+}
+
+// ListByUser возвращает объявления пользователя (все или заданного статуса),
+// новейшие сверху, без дочерних сущностей.
+func (r *Repo) ListByUser(ctx context.Context, userID, status string, limit, offset int) ([]domain.Ad, error) {
+	args := []any{userID}
+	sql := `SELECT ` + adColumns + ` FROM ads WHERE user_id = $1::uuid`
+	n := 2
+	if status != "" {
+		sql += fmt.Sprintf(" AND status = $%d", n)
+		args = append(args, status)
+		n++
+	}
+	sql += fmt.Sprintf(" ORDER BY created_at DESC, id DESC LIMIT $%d OFFSET $%d", n, n+1)
+	args = append(args, limit, offset)
+	return r.queryAds(ctx, sql, args...)
+}
+
+// queryAds выполняет запрос списка объявлений (без дочерних сущностей).
+func (r *Repo) queryAds(ctx context.Context, sql string, args ...any) ([]domain.Ad, error) {
+	rows, err := r.pool.Query(ctx, sql, args...)
+	if err != nil {
+		return nil, fmt.Errorf("repo: запрос списка объявлений: %w", err)
+	}
+	defer rows.Close()
+
+	var out []domain.Ad
+	for rows.Next() {
+		a, err := scanAd(rows)
+		if err != nil {
+			return nil, fmt.Errorf("repo: чтение объявления списка: %w", err)
+		}
+		out = append(out, a)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("repo: перебор списка объявлений: %w", err)
+	}
+	return out, nil
+}
+
 // GetByID возвращает объявление со значениями атрибутов и изображениями.
 func (r *Repo) GetByID(ctx context.Context, id string) (domain.Ad, error) {
 	a, err := scanAd(r.pool.QueryRow(ctx, `SELECT `+adColumns+` FROM ads WHERE id = $1`, id))

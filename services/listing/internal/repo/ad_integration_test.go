@@ -141,6 +141,119 @@ func TestListingRepo_ApplyModeration_Idempotent(t *testing.T) {
 	assert.Equal(t, 1, countSubject(t, ctx, pool, events.SubjectAdUpdated), "повтор не публикует событие второй раз")
 }
 
+// seedAdFull вставляет объявление конкретного владельца/категории/региона с
+// атрибутами и изображениями (для тестов правки/списков).
+func seedAdFull(t *testing.T, ctx context.Context, r *repo.Repo, userID, categoryID string, regionID int16, status domain.Status) domain.Ad {
+	t.Helper()
+	id := newID(t)
+	now := time.Now().UTC()
+	ad := domain.Ad{
+		ID: id, UserID: userID, CategoryID: categoryID, Title: "Ad", Price: 100, Currency: "UZS",
+		RegionID: regionID, Status: status, PublishedAt: &now, CreatedAt: now, UpdatedAt: now,
+		Attributes: []domain.AdAttributeValue{{AttributeSlug: "brand", Value: "bmw"}},
+		Images:     []domain.AdImage{{MediaID: newID(t), IsCover: true}},
+	}
+	require.NoError(t, r.CreateWithEvent(ctx, ad, createdEvent(t, id)))
+	return ad
+}
+
+func TestListingRepo_UpdateWithEvent(t *testing.T) {
+	ctx := context.Background()
+	pool := startDB(t)
+	r := repo.NewRepo(pool)
+
+	ad := seedAdFull(t, ctx, r, newID(t), newID(t), 1, domain.StatusActive)
+	ad.Title = "Обновлённый"
+	ad.Price = 999
+	ad.Status = domain.StatusPending // повторная модерация
+	ad.Attributes = []domain.AdAttributeValue{{AttributeSlug: "year", Value: "2020"}}
+	ad.Images = []domain.AdImage{{MediaID: newID(t), SortOrder: 0, IsCover: true}, {MediaID: newID(t), SortOrder: 1}}
+	require.NoError(t, r.UpdateWithEvent(ctx, ad, eventOf(t, events.SubjectAdUpdated, ad.ID)))
+
+	got, err := r.GetByID(ctx, ad.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "Обновлённый", got.Title)
+	assert.Equal(t, int64(999), got.Price)
+	assert.Equal(t, domain.StatusPending, got.Status)
+	require.Len(t, got.Attributes, 1, "атрибуты заменены (replace-all)")
+	assert.Equal(t, "year", got.Attributes[0].AttributeSlug)
+	require.Len(t, got.Images, 2, "изображения заменены")
+	assert.Equal(t, 1, countSubject(t, ctx, pool, events.SubjectAdUpdated))
+
+	// Обновление несуществующего — ErrAdNotFound.
+	ghost := ad
+	ghost.ID = newID(t)
+	assert.ErrorIs(t, r.UpdateWithEvent(ctx, ghost, eventOf(t, events.SubjectAdUpdated, ghost.ID)), domain.ErrAdNotFound)
+}
+
+func TestListingRepo_DeleteWithEvent(t *testing.T) {
+	ctx := context.Background()
+	pool := startDB(t)
+	r := repo.NewRepo(pool)
+
+	ad := seedAdFull(t, ctx, r, newID(t), newID(t), 1, domain.StatusActive)
+	require.NoError(t, r.DeleteWithEvent(ctx, ad.ID, eventOf(t, events.SubjectAdDeleted, ad.ID)))
+
+	_, err := r.GetByID(ctx, ad.ID)
+	assert.ErrorIs(t, err, domain.ErrAdNotFound)
+
+	var attrs, imgs int
+	require.NoError(t, pool.QueryRow(ctx, "SELECT count(*) FROM ad_attribute_values WHERE ad_id=$1", ad.ID).Scan(&attrs))
+	require.NoError(t, pool.QueryRow(ctx, "SELECT count(*) FROM ad_images WHERE ad_id=$1", ad.ID).Scan(&imgs))
+	assert.Equal(t, 0, attrs)
+	assert.Equal(t, 0, imgs)
+	assert.Equal(t, 1, countSubject(t, ctx, pool, events.SubjectAdDeleted))
+
+	// Повторное удаление — ErrAdNotFound.
+	assert.ErrorIs(t, r.DeleteWithEvent(ctx, ad.ID, eventOf(t, events.SubjectAdDeleted, ad.ID)), domain.ErrAdNotFound)
+}
+
+func TestListingRepo_ListActiveAndByUser(t *testing.T) {
+	ctx := context.Background()
+	pool := startDB(t)
+	r := repo.NewRepo(pool)
+
+	user := newID(t)
+	catA, catB := newID(t), newID(t)
+	a1 := seedAdFull(t, ctx, r, user, catA, 1, domain.StatusActive)
+	seedAdFull(t, ctx, r, user, catB, 2, domain.StatusActive)
+	seedAdFull(t, ctx, r, user, catA, 1, domain.StatusDraft) // не активно — не в ленте
+
+	// Установим разные цены для сортировки.
+	_, err := pool.Exec(ctx, "UPDATE ads SET price = 500 WHERE id=$1", a1.ID)
+	require.NoError(t, err)
+
+	// Лента: только активные.
+	active, err := r.ListActive(ctx, domain.FeedFilter{Limit: 10})
+	require.NoError(t, err)
+	assert.Len(t, active, 2)
+	for _, a := range active {
+		assert.Equal(t, domain.StatusActive, a.Status)
+	}
+
+	// Фильтр по категории.
+	byCat, err := r.ListActive(ctx, domain.FeedFilter{CategoryID: catA, Limit: 10})
+	require.NoError(t, err)
+	require.Len(t, byCat, 1)
+	assert.Equal(t, a1.ID, byCat[0].ID)
+
+	// Сортировка по цене возрастанию: 100 (catB) раньше 500 (catA).
+	byPrice, err := r.ListActive(ctx, domain.FeedFilter{Sort: "price_asc", Limit: 10})
+	require.NoError(t, err)
+	require.Len(t, byPrice, 2)
+	assert.Equal(t, int64(100), byPrice[0].Price)
+
+	// Мои объявления: все три.
+	mine, err := r.ListByUser(ctx, user, "", 10, 0)
+	require.NoError(t, err)
+	assert.Len(t, mine, 3)
+
+	// Мои по статусу draft: одно.
+	drafts, err := r.ListByUser(ctx, user, string(domain.StatusDraft), 10, 0)
+	require.NoError(t, err)
+	assert.Len(t, drafts, 1)
+}
+
 func TestListingRepo_AddViews(t *testing.T) {
 	ctx := context.Background()
 	pool := startDB(t)

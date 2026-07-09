@@ -29,6 +29,13 @@ type fakeService struct {
 	lifeErr    error
 	gotAdID    string
 	gotOwner   string
+	gotUpdate  app.UpdateInput
+	listResult []domain.Ad
+	listErr    error
+	gotFilter  domain.FeedFilter
+	gotStatus  string
+	gotLimit   int
+	gotOffset  int
 }
 
 func (f *fakeService) Create(_ context.Context, in app.CreateInput) (domain.Ad, error) {
@@ -56,6 +63,30 @@ func (f *fakeService) lifecycle(adID, userID string) (domain.Ad, error) {
 		return domain.Ad{}, f.lifeErr
 	}
 	return f.lifeResult, nil
+}
+
+func (f *fakeService) Update(_ context.Context, adID, userID string, in app.UpdateInput) (domain.Ad, error) {
+	f.gotAdID, f.gotOwner, f.gotUpdate = adID, userID, in
+	if f.lifeErr != nil {
+		return domain.Ad{}, f.lifeErr
+	}
+	return f.lifeResult, nil
+}
+
+func (f *fakeService) Delete(_ context.Context, adID, userID string) error {
+	f.gotAdID, f.gotOwner = adID, userID
+	return f.lifeErr
+}
+
+func (f *fakeService) Feed(_ context.Context, filter domain.FeedFilter) ([]domain.Ad, error) {
+	f.gotFilter = filter
+	return f.listResult, f.listErr
+}
+
+func (f *fakeService) MyAds(_ context.Context, userID, status string, limit, offset int) ([]domain.Ad, error) {
+	f.gotOwner, f.gotStatus = userID, status
+	f.gotLimit, f.gotOffset = limit, offset
+	return f.listResult, f.listErr
 }
 
 func (f *fakeService) SubmitForModeration(_ context.Context, adID, userID string) (domain.Ad, error) {
@@ -212,4 +243,81 @@ func TestArchive_NotFound(t *testing.T) {
 	rec := do(t, newRouter(svc), http.MethodPost, "/api/v1/ads/ad-1/archive", "user-1", "")
 	assert.Equal(t, http.StatusNotFound, rec.Code)
 	assert.Contains(t, rec.Body.String(), "ad_not_found")
+}
+
+func TestUpdate_HappyPath(t *testing.T) {
+	svc := &fakeService{lifeResult: domain.Ad{ID: "ad-1", Status: domain.StatusPending, CreatedAt: time.Unix(0, 0).UTC()}}
+	rec := do(t, newRouter(svc), http.MethodPatch, "/api/v1/ads/ad-1", "user-1", `{"price":999,"phone_display":false}`)
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, "user-1", svc.gotOwner)
+	require.NotNil(t, svc.gotUpdate.Price)
+	assert.Equal(t, int64(999), *svc.gotUpdate.Price)
+	require.NotNil(t, svc.gotUpdate.PhoneDisplay)
+	assert.False(t, *svc.gotUpdate.PhoneDisplay)
+}
+
+func TestUpdate_AnonUnauthorized(t *testing.T) {
+	svc := &fakeService{}
+	rec := do(t, newRouter(svc), http.MethodPatch, "/api/v1/ads/ad-1", "", `{"price":1}`)
+	assert.Equal(t, http.StatusUnauthorized, rec.Code)
+}
+
+func TestUpdate_NotEditableConflict(t *testing.T) {
+	svc := &fakeService{lifeErr: domain.ErrNotEditable}
+	rec := do(t, newRouter(svc), http.MethodPatch, "/api/v1/ads/ad-1", "user-1", `{"title":"x"}`)
+	assert.Equal(t, http.StatusConflict, rec.Code)
+	assert.Contains(t, rec.Body.String(), "not_editable")
+}
+
+func TestDelete_NoContent(t *testing.T) {
+	svc := &fakeService{}
+	rec := do(t, newRouter(svc), http.MethodDelete, "/api/v1/ads/ad-1", "user-1", "")
+	assert.Equal(t, http.StatusNoContent, rec.Code)
+	assert.Equal(t, "ad-1", svc.gotAdID)
+}
+
+func TestDelete_AnonUnauthorized(t *testing.T) {
+	svc := &fakeService{}
+	rec := do(t, newRouter(svc), http.MethodDelete, "/api/v1/ads/ad-1", "", "")
+	assert.Equal(t, http.StatusUnauthorized, rec.Code)
+}
+
+func TestFeed_PublicWithParams(t *testing.T) {
+	svc := &fakeService{listResult: []domain.Ad{
+		{ID: "a1", Status: domain.StatusActive, CreatedAt: time.Unix(0, 0).UTC()},
+	}}
+	rec := do(t, newRouter(svc), http.MethodGet, "/api/v1/ads?limit=5&category_id=cat&region_id=3&sort=price_asc", "", "")
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, "cat", svc.gotFilter.CategoryID)
+	assert.Equal(t, int16(3), svc.gotFilter.RegionID)
+	assert.Equal(t, "price_asc", svc.gotFilter.Sort)
+	assert.Equal(t, 5, svc.gotFilter.Limit)
+
+	var resp listResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.Len(t, resp.Ads, 1)
+	assert.Equal(t, "a1", resp.Ads[0].ID)
+}
+
+func TestMyAds_RequiresAuth(t *testing.T) {
+	svc := &fakeService{}
+	rec := do(t, newRouter(svc), http.MethodGet, "/api/v1/me/ads", "", "")
+	assert.Equal(t, http.StatusUnauthorized, rec.Code)
+}
+
+func TestMyAds_HappyPath(t *testing.T) {
+	svc := &fakeService{listResult: []domain.Ad{{ID: "a1", CreatedAt: time.Unix(0, 0).UTC()}}}
+	rec := do(t, newRouter(svc), http.MethodGet, "/api/v1/me/ads?status=active&limit=10&offset=2", "user-1", "")
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, "user-1", svc.gotOwner)
+	assert.Equal(t, "active", svc.gotStatus)
+	assert.Equal(t, 10, svc.gotLimit)
+	assert.Equal(t, 2, svc.gotOffset)
+}
+
+func TestMyAds_InvalidStatus(t *testing.T) {
+	svc := &fakeService{}
+	rec := do(t, newRouter(svc), http.MethodGet, "/api/v1/me/ads?status=weird", "user-1", "")
+	assert.Equal(t, http.StatusUnprocessableEntity, rec.Code)
+	assert.Contains(t, rec.Body.String(), "invalid_status")
 }

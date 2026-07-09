@@ -1,13 +1,17 @@
-status_id: "20260709-144500"
+status_id: "20260709-151500"
 project: "Bozor"
 version: "1.0"
 
 current:
-  chapter: "3"                     # CHAPTER 3: Listings & Media
-  stage: "3.6"                     # STAGE 3.6: API объявлений + outbox-события (POST/GET/PATCH/DELETE, лента, me/ads)
+  chapter: "4"                     # CHAPTER 4: Search
+  stage: "4.1"                     # STAGE 4.1: Search-сервис + схема коллекции Typesense
   status: "not_started"
 
 completed:
+  - stage_id: "3.6"
+    title: "Listing: полный REST API объявлений (PATCH/DELETE/лента/me-ads) + полный набор bozor.ad.* — CHAPTER 3 завершён"
+    completed_date: "2026-07-09"
+    evidence: "Полный контур объявлений (ADR-022). domain: Status.Editable() (draft/pending/rejected/active), FeedFilter (category/region/sort/limit/offset), ErrNotEditable. repo: UpdateWithEvent (UPDATE полей + replace-all атрибутов/изображений + outbox одной tx; ErrAdNotFound если нет), DeleteWithEvent (DELETE ads каскадом детей + bozor.ad.deleted; ErrAdNotFound повторно), ListActive (status=active, фильтры category::uuid/region, сорт COALESCE(bumped_at,published_at) DESC | price_asc/desc, LIMIT/OFFSET, без детей), ListByUser (по user_id + опц. status, created_at DESC), queryAds-хелпер. app: UpdateInput (указатели, nil=не менять), Update (владелец→ErrForbidden, Editable→ErrNotEditable, applyUpdate считает изменение ключевых полей [title/description/price/category/attrs/images], ре-валидация ValidateCore/Images + атрибутов против Catalog, ключевое изменение active→pending повторная модерация, bozor.ad.updated), Delete (владелец, bozor.ad.deleted), Feed/MyAds (clampPage limit 20/max100), Store расширен. transport: PATCH /ads/{id}, DELETE /ads/{id} (204), GET /ads (лента, публично, parseRegionID smallint-safe), GET /me/ads (владелец, status→422 invalid_status), updateRequest/listResponse DTO, ErrNotEditable→409 not_editable; роутер обновлён. Тесты: unit app (Update: active-ключевое→pending / active-неключевое→active / draft→draft / чужой-403 / терминал→not_editable / ре-валидация атрибутов; Delete happy/чужой; Feed clamp/default; MyAds параметры), transport (PATCH 200/401/409, DELETE 204/401, Feed публично с параметрами, MyAds 401/happy/422) + integration на testcontainers postgres (UpdateWithEvent заменяет поля/атрибуты/изображения + событие + ErrAdNotFound; DeleteWithEvent каскад+событие+повтор ErrAdNotFound; ListActive только активные/фильтр категории/сорт цены + ListByUser все/по статусу) — go test PASS (default + integration repo 27s); golangci-lint 0 issues (default+integration; исправлен G115 int→int16 через parseRegionID); gofmt чисто; go build все 7 модулей. Живая проверка (listing-ads healthy): PATCH title на draft→draft; submit+approve→active; PATCH price на active→pending (повторная модерация, +bozor.ad.updated, всего 4 updated по объявлению); PATCH проданного→409 not_editable; чужой PATCH→403, аноним→401; DELETE→204, GET после→404, bozor.ad.deleted published; GET /ads (публично) вернул активные, sort=price_asc отсортировал, region_id=2 отфильтровал; GET /me/ads?status=active вернул мои, аноним→401, status=weird→422; outbox все subjects published=t (created 10, updated 21, sold 2, expired 1, deleted 1 — relay→NATS). CHAPTER 3 DoD выполнен: создание с фото+атрибутами, жизненный цикл, события публикуются, API 'все объявления' (лента) и 'объявление по id'"
   - stage_id: "3.5"
     title: "Listing: асинхронный счётчик просмотров — буфер в Redis (Lua-drain) + пакетный флеш в PostgreSQL"
     completed_date: "2026-07-09"
@@ -91,8 +95,9 @@ completed:
     evidence: "services/location (модуль bozor/services/location в go.work). Миграции: 00001 схема (regions: id smallint PK, slug UNIQUE, name_uz/name_ru, lat/lon, sort_order; cities: id PK, region_id FK ON DELETE CASCADE, slug UNIQUE, имена/гео/sort, индекс по region_id,sort_order) + 00002 идемпотентный сид (ADR-007, ON CONFLICT DO UPDATE): 14 первичных регионов (12 областей + г.Ташкент + Респ. Каракалпакстан) и 56 городов/районов с реальными координатами WGS84 — включая 12 районов Ташкента и по 2–4 города на регион (апострофы в узбекских названиях экранированы: Farg'ona, Qo'qon, Qoraqalpog'iston и т.д.). Слой: domain (Region/City, lat/lon *float64, ErrRegionNotFound), repo (Regions/CitiesByRegion/RegionExists через pgx, ORDER BY sort_order), app (Service; Cities → 404 при несуществующем регионе, пустой список = регион без городов), transport (chi + middleware pkg/shared, GET /api/v1/locations/regions, GET /api/v1/locations/regions/{id}/cities; 422 на нечисловой id). Config: только DSN (app→PgBouncer, migrate→Postgres напрямую, ADR-013). Миграции при старте через pkg/shared/migrate. Dockerfile build-local go.work → distroless nonroot, healthcheck /location -health. Compose: сервис location + dev-порт 8082 + scrape-job prometheus. Тесты: unit (config DSN, transport regions/cities/404/422/not-found) + integration на testcontainers postgres (14 регионов, 56 городов, 12 районов Ташкента, апостроф Farg'ona, RegionExists, пустой список для чужого региона) — go test -tags=integration PASS (6.7s); golangci-lint 0 issues (default+integration). Живая проверка (15 контейнеров): миграции applied=2, рестарт→applied=0 (идемпотентно); /readyz ready; напрямую и через gateway (routing /api/v1/locations→location): 14 регионов (первый — г.Ташкент), 12 районов Ташкента, апостроф Farg'ona корректен, Самарканд/Каттакурган/Ургут; 404 неизвестный регион, 422 нечисловой id; Prometheus up{job=location}=1"
 
 next_actions:
-  - "Stage 3.6: API объявлений + outbox-события — POST/GET/PATCH/DELETE /ads, лента GET /ads, GET /me/ads; правка активного → повторная модерация (active→pending); полный набор bozor.ad.* (sold/renew/submit/archive и счётчик просмотров уже доставлены в 3.4/3.5)"
-  - "CHAPTER 4 (Search): Stage 4.1 — Search-сервис + схема коллекции Typesense (ads: title/description uz/ru, category_path, регион/город, цена, attrs фасеты, is_top, geo)"
+  - "Stage 4.1: Search-сервис + схема коллекции Typesense (ads: title/description uz/ru, category_path, регион/город, цена, attrs.* фасеты, created_at/bumped_at, is_top, promotion_rank, geo)"
+  - "Stage 4.2: индексатор на событиях — потребитель bozor.ad.created|updated|deleted|approved|bumped|sold|expired (outbox→consumer→Typesense), идемпотентность, DLQ, инструмент полной переиндексации"
+  - "Stage 4.3: API поиска — GET /ads/search (полнотекст uz/ru, typo, фильтры/фасеты, сортировки, пагинация, гео) + GET /ads/search/facets"
 
 decisions:                         # краткие ссылки; полные ADR — в DECISIONS.md
   - decision: "Брокер — NATS JetStream (не Kafka) ради лёгкости на Compose"
@@ -151,6 +156,10 @@ decisions:                         # краткие ссылки; полные A
     rationale: "Устраняет write-hotspot одиночных UPDATE популярной карточки; атомарный снимок всего буфера одним EVAL без потери инкрементов; batch-UPDATE FROM VALUES; near-real-time чтение (персистентное+буфер); best-effort к сбоям Redis (fail-open чтение) и БД (Restore+повтор)"
     date: "2026-07-09"
     alternatives: ["Ключ на объявление + GETDEL", "Прямой UPDATE на каждый просмотр", "Отдельный POST /ads/{id}/view"]
+  - decision: "API объявлений — частичный PATCH с повторной модерацией ключевых полей, hard-delete с bozor.ad.deleted, лента из БД до Search (ADR-022)"
+    rationale: "PATCH-указатели минимизируют полезную нагрузку; правка ключевых полей активного шлёт на повторную модерацию (ARCHITECTURE §4.5); ре-валидация атрибутов против Catalog; hard-delete + событие (Search снимает индекс); простая DB-лента активных закрывает DoD CHAPTER 3, богатый поиск — в CHAPTER 4"
+    date: "2026-07-09"
+    alternatives: ["Полная замена PUT", "Soft-delete", "Лента только через Search с самого начала"]
 
 open_questions: []
 
@@ -167,10 +176,10 @@ tech_stack:
   deploy: ["Docker Compose", "nginx"]
 
 metrics:
-  completed_stages: 20
+  completed_stages: 21
   total_stages: 52
-  completion_percentage: 38
-  estimated_remaining_stages: 32
-  chapters_completed: ["0", "1", "2"]   # CHAPTER 0, 1, 2 завершены; CHAPTER 3 в работе — 3.1 (upload) + 3.2 (обработка) + 3.3 (модель+gRPC) + 3.4 (жизненный цикл) + 3.5 (просмотры) готовы; остаётся 3.6 (API+события)
+  completion_percentage: 40
+  estimated_remaining_stages: 31
+  chapters_completed: ["0", "1", "2", "3"]   # CHAPTER 0-3 завершены; CHAPTER 4 (Search) — следующий
 
 notes: "Backend-only, фронтенда нет. Целевая нагрузка: десятки тысяч DAU. Автономный режим работы подтверждён заказчиком. Коммиты — от имени baxromsafarov. Окружение: Windows 11, Go 1.26.4, Docker Desktop 29.2.1 + Compose v5, golangci-lint 2.12.2, goose, buf. Нюанс: локально go test без -race (нет cgo на Windows); -race выполняется в CI на Ubuntu. goconst min-occurrences=5. Инфра-нюансы (Stage 0.3): postgres:18 монтирует /var/lib/postgresql (не .../data); healthcheck typesense — через bash /dev/tcp (нет curl/wget/nc в образе). Локальный .env создаётся из .env.example (gitignore)."

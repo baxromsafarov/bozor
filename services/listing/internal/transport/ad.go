@@ -7,6 +7,8 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"net/url"
+	"strconv"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -26,6 +28,10 @@ const maxBodyBytes = 64 << 10
 type Service interface {
 	Create(ctx context.Context, in app.CreateInput) (domain.Ad, error)
 	Get(ctx context.Context, id string) (domain.Ad, error)
+	Update(ctx context.Context, adID, userID string, in app.UpdateInput) (domain.Ad, error)
+	Delete(ctx context.Context, adID, userID string) error
+	Feed(ctx context.Context, f domain.FeedFilter) ([]domain.Ad, error)
+	MyAds(ctx context.Context, userID, status string, limit, offset int) ([]domain.Ad, error)
 	SubmitForModeration(ctx context.Context, adID, userID string) (domain.Ad, error)
 	MarkSold(ctx context.Context, adID, userID string) (domain.Ad, error)
 	Renew(ctx context.Context, adID, userID string) (domain.Ad, error)
@@ -67,6 +73,27 @@ type createRequest struct {
 	PhoneDisplay bool           `json:"phone_display"`
 	Attributes   []attributeDTO `json:"attributes"`
 	Images       []imageDTO     `json:"images"`
+}
+
+type updateRequest struct {
+	Title        *string         `json:"title"`
+	Description  *string         `json:"description"`
+	Price        *int64          `json:"price"`
+	Currency     *string         `json:"currency"`
+	CategoryID   *string         `json:"category_id"`
+	RegionID     *int16          `json:"region_id"`
+	CityID       *int64          `json:"city_id"`
+	Lat          *float64        `json:"lat"`
+	Lng          *float64        `json:"lng"`
+	PhoneDisplay *bool           `json:"phone_display"`
+	Attributes   *[]attributeDTO `json:"attributes"`
+	Images       *[]imageDTO     `json:"images"`
+}
+
+type listResponse struct {
+	Ads    []adResponse `json:"ads"`
+	Limit  int          `json:"limit"`
+	Offset int          `json:"offset"`
 }
 
 type adResponse struct {
@@ -124,6 +151,85 @@ func (h *Handler) Get(w http.ResponseWriter, r *http.Request) {
 	httpx.Respond(w, http.StatusOK, toResponse(ad))
 }
 
+// Update изменяет объявление владельца (частичный PATCH).
+func (h *Handler) Update(w http.ResponseWriter, r *http.Request) {
+	owner := authx.UserID(r.Context())
+	if owner == "" {
+		httpx.WriteProblem(w, r, apperr.New(apperr.KindUnauthorized, "unauthorized",
+			"Требуется авторизация", "Avtorizatsiya talab qilinadi"))
+		return
+	}
+	var req updateRequest
+	if err := httpx.DecodeJSON(w, r, &req, maxBodyBytes); err != nil {
+		httpx.WriteProblem(w, r, err)
+		return
+	}
+	ad, err := h.svc.Update(r.Context(), chi.URLParam(r, "id"), owner, toUpdateInput(req))
+	if err != nil {
+		h.writeAdError(w, r, err)
+		return
+	}
+	httpx.Respond(w, http.StatusOK, toResponse(ad))
+}
+
+// Delete удаляет объявление владельца.
+func (h *Handler) Delete(w http.ResponseWriter, r *http.Request) {
+	owner := authx.UserID(r.Context())
+	if owner == "" {
+		httpx.WriteProblem(w, r, apperr.New(apperr.KindUnauthorized, "unauthorized",
+			"Требуется авторизация", "Avtorizatsiya talab qilinadi"))
+		return
+	}
+	if err := h.svc.Delete(r.Context(), chi.URLParam(r, "id"), owner); err != nil {
+		h.writeAdError(w, r, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// Feed отдаёт ленту активных объявлений (публично, пагинация/фильтры/сортировка).
+func (h *Handler) Feed(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	limit, offset := pageParams(q)
+	f := domain.FeedFilter{
+		CategoryID: q.Get("category_id"),
+		RegionID:   parseRegionID(q.Get("region_id")),
+		Sort:       q.Get("sort"),
+		Limit:      limit,
+		Offset:     offset,
+	}
+	ads, err := h.svc.Feed(r.Context(), f)
+	if err != nil {
+		h.writeAdError(w, r, err)
+		return
+	}
+	httpx.Respond(w, http.StatusOK, toListResponse(ads, limit, offset))
+}
+
+// MyAds отдаёт объявления текущего пользователя (по статусу, пагинация).
+func (h *Handler) MyAds(w http.ResponseWriter, r *http.Request) {
+	owner := authx.UserID(r.Context())
+	if owner == "" {
+		httpx.WriteProblem(w, r, apperr.New(apperr.KindUnauthorized, "unauthorized",
+			"Требуется авторизация", "Avtorizatsiya talab qilinadi"))
+		return
+	}
+	q := r.URL.Query()
+	status := q.Get("status")
+	if status != "" && !domain.Status(status).Valid() {
+		httpx.WriteProblem(w, r, apperr.New(apperr.KindInvalid, "invalid_status",
+			"Неизвестный статус", "Noma'lum holat"))
+		return
+	}
+	limit, offset := pageParams(q)
+	ads, err := h.svc.MyAds(r.Context(), owner, status, limit, offset)
+	if err != nil {
+		h.writeAdError(w, r, err)
+		return
+	}
+	httpx.Respond(w, http.StatusOK, toListResponse(ads, limit, offset))
+}
+
 // Submit отправляет объявление владельца на модерацию (draft|rejected → pending).
 func (h *Handler) Submit(w http.ResponseWriter, r *http.Request) {
 	h.lifecycle(w, r, h.svc.SubmitForModeration)
@@ -179,6 +285,68 @@ func toCreateInput(owner string, req createRequest) app.CreateInput {
 	return in
 }
 
+// toUpdateInput переводит частичный запрос PATCH во вход use-case.
+func toUpdateInput(req updateRequest) app.UpdateInput {
+	in := app.UpdateInput{
+		Title: req.Title, Description: req.Description, Price: req.Price, Currency: req.Currency,
+		CategoryID: req.CategoryID, RegionID: req.RegionID, CityID: req.CityID,
+		Lat: req.Lat, Lng: req.Lng, PhoneDisplay: req.PhoneDisplay,
+	}
+	if req.Attributes != nil {
+		attrs := make([]domain.AdAttributeValue, 0, len(*req.Attributes))
+		for _, a := range *req.Attributes {
+			attrs = append(attrs, domain.AdAttributeValue{AttributeSlug: a.Slug, Value: a.Value})
+		}
+		in.Attributes = &attrs
+	}
+	if req.Images != nil {
+		imgs := make([]domain.AdImage, 0, len(*req.Images))
+		for _, img := range *req.Images {
+			imgs = append(imgs, domain.AdImage{MediaID: img.MediaID, SortOrder: img.SortOrder, IsCover: img.IsCover})
+		}
+		in.Images = &imgs
+	}
+	return in
+}
+
+// toListResponse собирает ответ ленты/списка из объявлений.
+func toListResponse(ads []domain.Ad, limit, offset int) listResponse {
+	out := listResponse{Ads: make([]adResponse, 0, len(ads)), Limit: limit, Offset: offset}
+	for _, a := range ads {
+		out.Ads = append(out.Ads, toResponse(a))
+	}
+	return out
+}
+
+// pageParams извлекает limit/offset из query (валидация/клампинг — в use-case).
+func pageParams(q url.Values) (limit, offset int) {
+	return atoiDefault(q.Get("limit"), 0), atoiDefault(q.Get("offset"), 0)
+}
+
+// atoiDefault парсит целое из строки, возвращая def при пустом/некорректном значении.
+func atoiDefault(s string, def int) int {
+	if s == "" {
+		return def
+	}
+	n, err := strconv.Atoi(s)
+	if err != nil {
+		return def
+	}
+	return n
+}
+
+// parseRegionID парсит region_id как smallint (0 — любой регион / некорректное значение).
+func parseRegionID(s string) int16 {
+	if s == "" {
+		return 0
+	}
+	n, err := strconv.ParseInt(s, 10, 16)
+	if err != nil {
+		return 0
+	}
+	return int16(n)
+}
+
 // toResponse строит ответ API из объявления.
 func toResponse(a domain.Ad) adResponse {
 	resp := adResponse{
@@ -217,6 +385,8 @@ func (h *Handler) writeAdError(w http.ResponseWriter, r *http.Request, err error
 		problem(w, r, apperr.KindForbidden, "forbidden", "Нет прав на объявление", "E'longa huquq yo'q")
 	case errors.Is(err, domain.ErrInvalidTransition):
 		problem(w, r, apperr.KindConflict, "invalid_transition", "Недопустимый переход статуса", "Holatni bunday o'zgartirib bo'lmaydi")
+	case errors.Is(err, domain.ErrNotEditable):
+		problem(w, r, apperr.KindConflict, "not_editable", "Объявление нельзя редактировать в текущем статусе", "E'lonni bu holatda tahrirlab bo'lmaydi")
 	case errors.Is(err, app.ErrCategoryNotFound):
 		problem(w, r, apperr.KindInvalid, "category_not_found", "Категория не найдена", "Turkum topilmadi")
 	case errors.Is(err, domain.ErrUnknownAttribute):
