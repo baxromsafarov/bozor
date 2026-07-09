@@ -91,6 +91,34 @@ func TestModerator_Reject(t *testing.T) {
 	assert.Nil(t, store.applied.PublishedAt, "отклонение не публикует объявление")
 }
 
+func TestModerator_BlockActiveAd(t *testing.T) {
+	ad := pendingAd()
+	ad.Status = domain.StatusActive
+	store := &fakeModStore{ad: ad}
+	err := NewModerator(store, 720*time.Hour, discardLogger()).
+		Handle(context.Background(), decisionEnv(t, events.SubjectAdBlocked, "ad-1"))
+	require.NoError(t, err)
+	require.NotNil(t, store.applied, "снятие применяется к активному объявлению")
+	assert.Equal(t, domain.StatusActive, store.applied.From, "снятие идёт из текущего статуса")
+	assert.Equal(t, domain.StatusBlocked, store.applied.To)
+	assert.Zero(t, store.marked)
+
+	var payload app.AdEvent
+	require.NoError(t, store.appliedEv.Decode(&payload))
+	assert.Equal(t, "blocked", payload.Status)
+}
+
+func TestModerator_BlockAlreadyBlockedMarksProcessed(t *testing.T) {
+	ad := pendingAd()
+	ad.Status = domain.StatusBlocked
+	store := &fakeModStore{ad: ad}
+	err := NewModerator(store, 720*time.Hour, discardLogger()).
+		Handle(context.Background(), decisionEnv(t, events.SubjectAdBlocked, "ad-1"))
+	require.NoError(t, err)
+	assert.Nil(t, store.applied, "повторное снятие не выполняет работу")
+	assert.Equal(t, 1, store.marked)
+}
+
 func TestModerator_AlreadyProcessedSkips(t *testing.T) {
 	store := &fakeModStore{processed: true, ad: pendingAd()}
 	err := NewModerator(store, 720*time.Hour, discardLogger()).

@@ -45,6 +45,7 @@ const (
 var subjectGroups = map[string]string{
 	events.SubjectAdApproved:         GroupAdStatus,
 	events.SubjectAdRejected:         GroupAdStatus,
+	events.SubjectAdBlocked:          GroupAdStatus,
 	events.SubjectAdExpired:          GroupAdStatus,
 	events.SubjectChatMessageSent:    GroupChatMessage,
 	events.SubjectSavedSearchMatched: GroupSavedSearch,
@@ -62,6 +63,7 @@ func Subjects() []string {
 	return []string{
 		events.SubjectAdApproved,
 		events.SubjectAdRejected,
+		events.SubjectAdBlocked,
 		events.SubjectAdExpired,
 		events.SubjectChatMessageSent,
 		events.SubjectSavedSearchMatched,

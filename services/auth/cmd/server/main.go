@@ -34,6 +34,7 @@ import (
 	"bozor/services/auth/internal/session"
 	"bozor/services/auth/internal/telegram"
 	"bozor/services/auth/internal/transport"
+	"bozor/services/auth/internal/worker"
 	"bozor/services/auth/migrations"
 )
 
@@ -128,6 +129,15 @@ func run() error {
 	userRepo := repo.NewUserRepo(pool)
 	refreshRepo := repo.NewRefreshRepo(pool)
 	auditRepo := repo.NewAuditRepo(pool)
+
+	// Консьюмер bozor.user.banned: отзыв сессий забаненного пользователя.
+	banner := worker.NewBanner(userRepo, log)
+	ccBan, err := natsx.Consume(ctx, js, events.StreamName, worker.BanConsumer,
+		[]string{events.SubjectUserBanned}, 3, banner.Handle)
+	if err != nil {
+		return fmt.Errorf("консьюмер bozor.user.banned: %w", err)
+	}
+	defer ccBan.Stop()
 	signer := authx.NewSigner(cfg.JWTSigningKey, serviceName, cfg.JWTAccessTTL)
 	tokenSvc := app.NewTokenService(signer, refreshRepo, auditRepo, cfg.JWTRefreshTTL, log)
 

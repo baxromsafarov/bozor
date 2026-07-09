@@ -112,6 +112,7 @@ func run() error {
 	defer wg.Wait()
 
 	// Консьюмер авто-модерации: bozor.ad.created|updated (pending) → авто-проверки.
+	// Тот же клиент Listing обогащает событие снятия объявления по жалобе.
 	listing := listingclient.New(cfg.ListingInternalURL, config.ListingTimeout)
 	moderator := worker.New(listing, store, log)
 	cc, err := natsx.Consume(ctx, js, events.StreamName, worker.Consumer,
@@ -125,6 +126,7 @@ func run() error {
 		Log:            log,
 		Handler:        transport.NewHandler(store, log),
 		Decision:       transport.NewDecisionHandler(app.NewService(store, log), log),
+		Reports:        transport.NewReportHandler(app.NewOpsService(store, listing, log), log),
 		MetricsHandler: metricsHandler,
 		ReadyChecks: map[string]httpx.Check{
 			"postgres": pool.Ping,

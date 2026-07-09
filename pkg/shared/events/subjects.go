@@ -15,6 +15,7 @@ const (
 	SubjectAdDeleted  = "bozor.ad.deleted"
 	SubjectAdApproved = "bozor.ad.approved"
 	SubjectAdRejected = "bozor.ad.rejected"
+	SubjectAdBlocked  = "bozor.ad.blocked" // снятие с публикации по жалобе (любой статус → blocked)
 	SubjectAdSold     = "bozor.ad.sold"
 	SubjectAdExpired  = "bozor.ad.expired"
 	SubjectAdBumped   = "bozor.ad.bumped"

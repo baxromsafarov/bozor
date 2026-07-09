@@ -53,6 +53,32 @@ func (r *UserRepo) UpsertUserWithEvent(ctx context.Context, u domain.User, ev ev
 	return id, created, nil
 }
 
+// BanUser помечает пользователя забаненным и отзывает все его refresh-токены
+// одной транзакцией (реакция на bozor.user.banned). Идемпотентно: повторная
+// доставка события не меняет результат. Возвращает число отозванных токенов.
+func (r *UserRepo) BanUser(ctx context.Context, userID string) (int64, error) {
+	var revoked int64
+	err := pgxx.WithTx(ctx, r.pool, func(tx pgx.Tx) error {
+		if _, e := tx.Exec(ctx,
+			`UPDATE users SET status = 'banned', updated_at = now() WHERE id = $1 AND status <> 'deleted'`,
+			userID); e != nil {
+			return fmt.Errorf("repo: пометка бана пользователя: %w", e)
+		}
+		tag, e := tx.Exec(ctx,
+			`UPDATE refresh_tokens SET revoked_at = now() WHERE user_id = $1 AND revoked_at IS NULL`,
+			userID)
+		if e != nil {
+			return fmt.Errorf("repo: отзыв refresh-токенов: %w", e)
+		}
+		revoked = tag.RowsAffected()
+		return nil
+	})
+	if err != nil {
+		return 0, err
+	}
+	return revoked, nil
+}
+
 // upsertUser вставляет или обновляет пользователя, возвращая его id и признак
 // «создан впервые». Последний определяется через (xmax = 0): для INSERT
 // xmax = 0, для UPDATE — нет. RETURNING id даёт фактический id строки:

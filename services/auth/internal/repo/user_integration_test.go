@@ -88,3 +88,33 @@ func TestUpsertUserWithEvent_Integration(t *testing.T) {
 	require.NoError(t, pool.QueryRow(ctx, "SELECT phone FROM users WHERE telegram_user_id=42").Scan(&phone))
 	assert.Equal(t, "+998900000000", phone, "телефон обновлён")
 }
+
+func TestUserRepo_BanUser(t *testing.T) {
+	ctx := context.Background()
+	pool := startAuthDB(t)
+	r := repo.NewUserRepo(pool)
+	refreshRepo := repo.NewRefreshRepo(pool)
+
+	userID := insertUser(t, pool, 4242)
+	// Два активных refresh-токена пользователя.
+	insertRefresh(t, refreshRepo, userID, newFamily(t), time.Now().Add(time.Hour))
+	insertRefresh(t, refreshRepo, userID, newFamily(t), time.Now().Add(time.Hour))
+
+	revoked, err := r.BanUser(ctx, userID)
+	require.NoError(t, err)
+	assert.EqualValues(t, 2, revoked, "оба токена отозваны")
+
+	var status string
+	require.NoError(t, pool.QueryRow(ctx, "SELECT status FROM users WHERE id=$1", userID).Scan(&status))
+	assert.Equal(t, "banned", status)
+
+	var active int
+	require.NoError(t, pool.QueryRow(ctx,
+		"SELECT count(*) FROM refresh_tokens WHERE user_id=$1 AND revoked_at IS NULL", userID).Scan(&active))
+	assert.Equal(t, 0, active, "активных токенов не осталось")
+
+	// Идемпотентность: повторный бан не находит активных токенов.
+	revoked, err = r.BanUser(ctx, userID)
+	require.NoError(t, err)
+	assert.EqualValues(t, 0, revoked)
+}

@@ -48,7 +48,7 @@ type decisionPayload struct {
 }
 
 // Handle обрабатывает одно решение модерации. Ошибка ведёт к повтору/DLQ (natsx),
-// nil — к подтверждению. Идемпотентно: inbox + переход только из статуса pending —
+// nil — к подтверждению. Идемпотентно: inbox + условный переход (см. plan) —
 // повторная доставка и события «не в модерации» не выполняют работу дважды.
 func (m *Moderator) Handle(ctx context.Context, env events.Envelope) error {
 	var pl decisionPayload
@@ -75,14 +75,14 @@ func (m *Moderator) Handle(ctx context.Context, env events.Envelope) error {
 	if err != nil {
 		return err
 	}
-	if ad.Status != domain.StatusPending {
-		// Не в модерации (уже решено/снято) — работа не нужна, но событие отметим.
-		return m.store.MarkEventProcessed(ctx, ModerationConsumer, env.ID)
-	}
 
-	upd, err := m.plan(env.Type)
+	upd, ok, err := m.plan(env.Type, ad.Status)
 	if err != nil {
 		return err
+	}
+	if !ok {
+		// Не в модерации / уже в целевом статусе — работа не нужна, но событие отметим.
+		return m.store.MarkEventProcessed(ctx, ModerationConsumer, env.ID)
 	}
 
 	// Отражаем переход в копии для полезной нагрузки события источника истины.
@@ -103,19 +103,32 @@ func (m *Moderator) Handle(ctx context.Context, env events.Envelope) error {
 	return m.store.ApplyModerationWithEvent(ctx, ModerationConsumer, env.ID, ad.ID, upd, ev)
 }
 
-// plan строит переход из типа события: approved → active (с published_at и
-// expires_at = now + adTTL), rejected → rejected.
-func (m *Moderator) plan(eventType string) (domain.StatusUpdate, error) {
-	upd := domain.StatusUpdate{From: domain.StatusPending}
+// plan строит переход из типа события и текущего статуса объявления.
+// approved/rejected — решения модерации подачи: применяются только из pending
+// (approved → active с published_at и expires_at = now + adTTL; rejected → rejected).
+// blocked — снятие по жалобе: любой статус → blocked (кроме уже заблокированного).
+// ok=false — работать не нужно (объявление не в модерации либо уже снято): событие
+// лишь отмечается обработанным.
+func (m *Moderator) plan(eventType string, current domain.Status) (domain.StatusUpdate, bool, error) {
 	switch eventType {
 	case events.SubjectAdApproved:
+		if current != domain.StatusPending {
+			return domain.StatusUpdate{}, false, nil
+		}
 		now := time.Now().UTC()
 		exp := now.Add(m.adTTL)
-		upd.To, upd.PublishedAt, upd.ExpiresAt = domain.StatusActive, &now, &exp
+		return domain.StatusUpdate{From: domain.StatusPending, To: domain.StatusActive, PublishedAt: &now, ExpiresAt: &exp}, true, nil
 	case events.SubjectAdRejected:
-		upd.To = domain.StatusRejected
+		if current != domain.StatusPending {
+			return domain.StatusUpdate{}, false, nil
+		}
+		return domain.StatusUpdate{From: domain.StatusPending, To: domain.StatusRejected}, true, nil
+	case events.SubjectAdBlocked:
+		if current == domain.StatusBlocked {
+			return domain.StatusUpdate{}, false, nil
+		}
+		return domain.StatusUpdate{From: current, To: domain.StatusBlocked}, true, nil
 	default:
-		return domain.StatusUpdate{}, fmt.Errorf("worker: неожиданный тип события %q", eventType)
+		return domain.StatusUpdate{}, false, fmt.Errorf("worker: неожиданный тип события %q", eventType)
 	}
-	return upd, nil
 }

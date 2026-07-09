@@ -131,7 +131,7 @@ func run() error {
 	// (Stage 3.4). До 3 попыток, затем DLQ (natsx); идемпотентность через inbox.
 	moderator := worker.NewModerator(adRepo, cfg.AdTTL, log)
 	cc, err := natsx.Consume(ctx, js, events.StreamName, worker.ModerationConsumer,
-		[]string{events.SubjectAdApproved, events.SubjectAdRejected}, 3, moderator.Handle)
+		[]string{events.SubjectAdApproved, events.SubjectAdRejected, events.SubjectAdBlocked}, 3, moderator.Handle)
 	if err != nil {
 		return fmt.Errorf("консьюмер решений модерации: %w", err)
 	}

@@ -28,6 +28,15 @@ var templates = map[string]renderer{
 		}
 		return pick(lang, ru, uz)
 	},
+	events.SubjectAdBlocked: func(lang string, p EventPayload) string {
+		ru := "🚫 Ваше объявление «" + p.Title + "» снято с публикации."
+		uz := "🚫 «" + p.Title + "» e'loningiz chop etishdan olib tashlandi."
+		if p.Reason != "" {
+			ru += " Причина: " + p.Reason + "."
+			uz += " Sababi: " + p.Reason + "."
+		}
+		return pick(lang, ru, uz)
+	},
 	events.SubjectAdExpired: func(lang string, p EventPayload) string {
 		return pick(lang,
 			"⌛ Срок действия объявления «"+p.Title+"» истёк. Продлите его в приложении.",

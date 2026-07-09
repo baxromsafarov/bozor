@@ -19,6 +19,7 @@ type Deps struct {
 	Log            *slog.Logger
 	Handler        *Handler
 	Decision       *DecisionHandler
+	Reports        *ReportHandler
 	ReadyChecks    map[string]httpx.Check
 	MetricsHandler http.Handler
 }
@@ -39,6 +40,14 @@ func NewRouter(d Deps) http.Handler {
 		r.Handle("/metrics", d.MetricsHandler)
 	}
 
+	// Подача жалобы — любой авторизованный пользователь (не только персонал).
+	if d.Reports != nil {
+		r.Group(func(api chi.Router) {
+			api.Use(authx.FromForwardedHeaders)
+			api.Post("/api/v1/reports", d.Reports.Create)
+		})
+	}
+
 	r.Group(func(api chi.Router) {
 		api.Use(authx.FromForwardedHeaders)
 		api.Use(requireStaff)
@@ -49,6 +58,12 @@ func NewRouter(d Deps) http.Handler {
 			api.Post("/api/v1/moderation/tasks/{adId}/approve", d.Decision.Approve)
 			api.Post("/api/v1/moderation/tasks/{adId}/reject", d.Decision.Reject)
 			api.Post("/api/v1/moderation/tasks/{adId}/request-edit", d.Decision.RequestEdit)
+		}
+		// Жалобы и баны — только персонал.
+		if d.Reports != nil {
+			api.Get("/api/v1/moderation/reports", d.Reports.List)
+			api.Post("/api/v1/moderation/reports/{id}/resolve", d.Reports.Resolve)
+			api.Post("/api/v1/moderation/bans", d.Reports.Ban)
 		}
 	})
 
