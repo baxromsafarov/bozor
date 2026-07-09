@@ -5,6 +5,7 @@ package repo
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 
 	"github.com/jackc/pgx/v5"
@@ -130,6 +131,51 @@ func upsertTask(ctx context.Context, tx pgx.Tx, t domain.Task) error {
 		return fmt.Errorf("repo: upsert задачи модерации: %w", err)
 	}
 	return nil
+}
+
+// GetTask возвращает задачу модерации по ad_id. found=false, если задачи нет.
+func (r *Repo) GetTask(ctx context.Context, adID string) (domain.Task, bool, error) {
+	var t domain.Task
+	var reasons []byte
+	err := r.pool.QueryRow(ctx, `
+		SELECT id, ad_id, user_id, title, content_hash, status, auto_result, reasons,
+		       COALESCE(decided_by::text, ''), COALESCE(comment, ''), decided_at, created_at, updated_at
+		FROM moderation_tasks WHERE ad_id = $1
+	`, adID).Scan(&t.ID, &t.AdID, &t.UserID, &t.Title, &t.ContentHash, &t.Status, &t.AutoResult,
+		&reasons, &t.DecidedBy, &t.Comment, &t.DecidedAt, &t.CreatedAt, &t.UpdatedAt)
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		return domain.Task{}, false, nil
+	case err != nil:
+		return domain.Task{}, false, fmt.Errorf("repo: чтение задачи %s: %w", adID, err)
+	}
+	if err := json.Unmarshal(reasons, &t.Reasons); err != nil {
+		return domain.Task{}, false, fmt.Errorf("repo: разбор причин: %w", err)
+	}
+	return t, true, nil
+}
+
+// DecideWithEvent применяет ручное решение модератора к задаче в статусе manual
+// (условный UPDATE защищает от гонок) и публикует событие для Listing/Notification
+// одной транзакцией. applied=false, если задача уже не в статусе manual.
+func (r *Repo) DecideWithEvent(ctx context.Context, adID, newStatus, moderatorID, comment string, ev events.Envelope) (bool, error) {
+	applied := false
+	err := pgxx.WithTx(ctx, r.pool, func(tx pgx.Tx) error {
+		tag, err := tx.Exec(ctx, `
+			UPDATE moderation_tasks
+			SET status = $2, decided_by = $3, comment = $4, decided_at = now(), updated_at = now()
+			WHERE ad_id = $1 AND status = $5
+		`, adID, newStatus, moderatorID, comment, domain.StatusManual)
+		if err != nil {
+			return fmt.Errorf("repo: применение решения к %s: %w", adID, err)
+		}
+		if tag.RowsAffected() == 0 {
+			return nil // задача уже вне ручной очереди
+		}
+		applied = true
+		return outbox.Enqueue(ctx, tx, ev)
+	})
+	return applied, err
 }
 
 // ListTasks возвращает задачи по статусу (для очереди/аудита) в порядке поступления.

@@ -1,12 +1,21 @@
 package domain_test
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 
 	"bozor/services/moderation/internal/domain"
 )
+
+func TestValidateReason(t *testing.T) {
+	assert.NoError(t, domain.ValidateReason("копия бренда"))
+	assert.ErrorIs(t, domain.ValidateReason(""), domain.ErrReasonRequired)
+	assert.ErrorIs(t, domain.ValidateReason("   "), domain.ErrReasonRequired)
+	assert.ErrorIs(t, domain.ValidateReason(strings.Repeat("я", domain.ReasonMaxLen+1)), domain.ErrReasonTooLong)
+	assert.NoError(t, domain.ValidateReason(strings.Repeat("я", domain.ReasonMaxLen)))
+}
 
 func TestNormalize(t *testing.T) {
 	assert.Equal(t, "копия iphone", domain.Normalize("  Копия   iPhone  "))

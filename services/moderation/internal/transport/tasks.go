@@ -23,7 +23,8 @@ const (
 
 // allowedStatuses — статусы, по которым можно фильтровать очередь.
 var allowedStatuses = map[string]bool{
-	domain.StatusManual: true, domain.StatusApproved: true, domain.StatusRejected: true,
+	domain.StatusManual: true, domain.StatusApproved: true,
+	domain.StatusRejected: true, domain.StatusEditRequested: true,
 }
 
 // Reader — чтение задач модерации (реализуется repo.Repo).

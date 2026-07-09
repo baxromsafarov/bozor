@@ -18,6 +18,7 @@ const serviceName = "moderation"
 type Deps struct {
 	Log            *slog.Logger
 	Handler        *Handler
+	Decision       *DecisionHandler
 	ReadyChecks    map[string]httpx.Check
 	MetricsHandler http.Handler
 }
@@ -43,6 +44,12 @@ func NewRouter(d Deps) http.Handler {
 		api.Use(requireStaff)
 		// Очередь модерации — только персонал (admin/moderator).
 		api.Get("/api/v1/moderation/tasks", d.Handler.ListTasks)
+		// Ручные действия модератора над задачами очереди.
+		if d.Decision != nil {
+			api.Post("/api/v1/moderation/tasks/{adId}/approve", d.Decision.Approve)
+			api.Post("/api/v1/moderation/tasks/{adId}/reject", d.Decision.Reject)
+			api.Post("/api/v1/moderation/tasks/{adId}/request-edit", d.Decision.RequestEdit)
+		}
 	})
 
 	notFound := func(w http.ResponseWriter, req *http.Request) {

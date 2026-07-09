@@ -24,6 +24,7 @@ import (
 	"bozor/pkg/shared/outbox"
 	"bozor/pkg/shared/pgxx"
 
+	"bozor/services/moderation/internal/app"
 	"bozor/services/moderation/internal/config"
 	"bozor/services/moderation/internal/listingclient"
 	"bozor/services/moderation/internal/repo"
@@ -123,6 +124,7 @@ func run() error {
 	router := transport.NewRouter(transport.Deps{
 		Log:            log,
 		Handler:        transport.NewHandler(store, log),
+		Decision:       transport.NewDecisionHandler(app.NewService(store, log), log),
 		MetricsHandler: metricsHandler,
 		ReadyChecks: map[string]httpx.Check{
 			"postgres": pool.Ping,

@@ -6,17 +6,41 @@ package domain
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"regexp"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // Статусы задачи модерации.
 const (
-	StatusApproved = "approved" // прошло авто-проверки → bozor.ad.approved
-	StatusManual   = "manual"   // не прошло → ручная очередь (6.3)
-	StatusRejected = "rejected" // отклонено вручную (6.3)
+	StatusApproved      = "approved"       // прошло авто-проверки / одобрено вручную → bozor.ad.approved
+	StatusManual        = "manual"         // не прошло авто-проверки → ручная очередь (6.3)
+	StatusRejected      = "rejected"       // отклонено вручную (6.3) → bozor.ad.rejected
+	StatusEditRequested = "edit_requested" // возвращено на доработку (6.3) → bozor.ad.rejected (editable)
 )
+
+// ReasonMaxLen — максимальная длина причины/комментария модератора (руны).
+const ReasonMaxLen = 500
+
+// Ошибки валидации ручного решения.
+var (
+	ErrReasonRequired = errors.New("причина обязательна")
+	ErrReasonTooLong  = errors.New("причина слишком длинная")
+)
+
+// ValidateReason проверяет обязательную причину ручного решения (reject/request-edit).
+func ValidateReason(reason string) error {
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		return ErrReasonRequired
+	}
+	if utf8.RuneCountInString(reason) > ReasonMaxLen {
+		return ErrReasonTooLong
+	}
+	return nil
+}
 
 // Результаты авто-проверки.
 const (
@@ -51,6 +75,9 @@ type Task struct {
 	Status      string
 	AutoResult  string
 	Reasons     []string
+	DecidedBy   string     // модератор ручного решения (пусто до решения)
+	Comment     string     // причина reject / пояснение request-edit
+	DecidedAt   *time.Time // время ручного решения
 	CreatedAt   time.Time
 	UpdatedAt   time.Time
 }

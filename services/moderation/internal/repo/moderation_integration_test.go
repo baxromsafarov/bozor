@@ -149,6 +149,61 @@ func TestRepo_ManualTask_And_Dedup(t *testing.T) {
 	assert.Equal(t, []string{"stopword:копия"}, list[0].Reasons)
 }
 
+func TestRepo_GetTask_And_Decide(t *testing.T) {
+	ctx := context.Background()
+	pool := startDB(t)
+	r := repo.NewRepo(pool)
+	adID := newID(t)
+	userID := newID(t)
+	moderator := newID(t)
+
+	// Нет задачи → found=false.
+	_, found, err := r.GetTask(ctx, adID)
+	require.NoError(t, err)
+	assert.False(t, found)
+
+	// Задача в ручной очереди.
+	task := domain.Task{ID: newID(t), AdID: adID, UserID: userID, Title: "Копия iPhone",
+		ContentHash: "h1", Status: domain.StatusManual, AutoResult: domain.AutoFlagged,
+		Reasons: []string{"stopword:копия"}}
+	require.NoError(t, r.SaveManualTask(ctx, consumer, newID(t), task))
+
+	got, found, err := r.GetTask(ctx, adID)
+	require.NoError(t, err)
+	require.True(t, found)
+	assert.Equal(t, domain.StatusManual, got.Status)
+	assert.Empty(t, got.DecidedBy)
+	assert.Nil(t, got.DecidedAt)
+
+	// Ручное отклонение с публикацией bozor.ad.rejected.
+	ev, err := events.New(events.SubjectAdRejected, "moderation",
+		map[string]any{"ad_id": adID, "reason": "бренд-копия"})
+	require.NoError(t, err)
+	applied, err := r.DecideWithEvent(ctx, adID, domain.StatusRejected, moderator, "бренд-копия", ev)
+	require.NoError(t, err)
+	assert.True(t, applied)
+
+	// Задача обновлена: статус, модератор, комментарий, время решения.
+	got, _, err = r.GetTask(ctx, adID)
+	require.NoError(t, err)
+	assert.Equal(t, domain.StatusRejected, got.Status)
+	assert.Equal(t, moderator, got.DecidedBy)
+	assert.Equal(t, "бренд-копия", got.Comment)
+	require.NotNil(t, got.DecidedAt)
+
+	// bozor.ad.rejected в outbox.
+	var n int
+	require.NoError(t, pool.QueryRow(ctx, `SELECT count(*) FROM outbox WHERE subject=$1`, events.SubjectAdRejected).Scan(&n))
+	assert.Equal(t, 1, n)
+
+	// Повторное решение по уже не-manual задаче → applied=false, без нового события.
+	applied, err = r.DecideWithEvent(ctx, adID, domain.StatusApproved, moderator, "", ev)
+	require.NoError(t, err)
+	assert.False(t, applied)
+	require.NoError(t, pool.QueryRow(ctx, `SELECT count(*) FROM outbox`).Scan(&n))
+	assert.Equal(t, 1, n) // новых событий нет
+}
+
 func TestRepo_UpsertByAdID_Remoderation(t *testing.T) {
 	ctx := context.Background()
 	r := repo.NewRepo(startDB(t))
