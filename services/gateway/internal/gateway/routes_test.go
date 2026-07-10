@@ -99,6 +99,41 @@ func TestRoutes_MeAdsPrecedence(t *testing.T) {
 	}
 }
 
+// TestRoutes_UsersReviewsPrecedence проверяет, что /api/v1/users/{id}/reviews
+// уходит в reviews, а /api/v1/users и /api/v1/users/{id} — в user-profile.
+func TestRoutes_UsersReviewsPrecedence(t *testing.T) {
+	profile := newEchoBackend()
+	defer profile.server.Close()
+	reviews := newEchoBackend()
+	defer reviews.server.Close()
+
+	router := newMultiUpstreamRouter(t, map[string]string{
+		"user-profile": profile.server.URL,
+		"reviews":      reviews.server.URL,
+	})
+
+	cases := []struct {
+		path        string
+		wantProfile int64
+		wantReviews int64
+	}{
+		{"/api/v1/users/u1", 1, 0},
+		{"/api/v1/users/u1/reviews", 0, 1},
+		{"/api/v1/users/u1/reviews?limit=10", 0, 1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.path, func(t *testing.T) {
+			profile.calls.Store(0)
+			reviews.calls.Store(0)
+			rec := httptest.NewRecorder()
+			router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, tc.path, nil))
+			require.Equal(t, http.StatusOK, rec.Code)
+			assert.Equal(t, tc.wantProfile, profile.calls.Load(), "вызовы user-profile")
+			assert.Equal(t, tc.wantReviews, reviews.calls.Load(), "вызовы reviews")
+		})
+	}
+}
+
 // TestRoutes_MeFavoritesPrecedence проверяет, что /api/v1/me/favorites уходит в
 // favorites-savedsearch, а /api/v1/me — в user-profile.
 func TestRoutes_MeFavoritesPrecedence(t *testing.T) {

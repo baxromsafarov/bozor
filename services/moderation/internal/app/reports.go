@@ -79,6 +79,12 @@ type messageBlockedPayload struct {
 	Reason    string `json:"reason"`
 }
 
+// reviewBlockedPayload — payload bozor.review.blocked (снятие отзыва).
+type reviewBlockedPayload struct {
+	ReviewID string `json:"review_id"`
+	Reason   string `json:"reason"`
+}
+
 // userBannedPayload — payload bozor.user.banned.
 type userBannedPayload struct {
 	UserID string     `json:"user_id"`
@@ -173,6 +179,16 @@ func (s *OpsService) takedownEvent(ctx context.Context, action string, rep domai
 		})
 		if err != nil {
 			return nil, fmt.Errorf("app: сборка bozor.chat.message_blocked (takedown): %w", err)
+		}
+		return &ev, nil
+	}
+
+	if rep.TargetType == domain.TargetReview {
+		ev, err := events.New(events.SubjectReviewBlocked, source, reviewBlockedPayload{
+			ReviewID: rep.TargetID, Reason: reason,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("app: сборка bozor.review.blocked (takedown): %w", err)
 		}
 		return &ev, nil
 	}

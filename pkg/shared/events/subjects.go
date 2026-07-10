@@ -50,6 +50,7 @@ const (
 
 	// Отзывы и модерация.
 	SubjectReviewCreated           = "bozor.review.created"
+	SubjectReviewBlocked           = "bozor.review.blocked" // снятие отзыва модератором по жалобе
 	SubjectModerationReportCreated = "bozor.moderation.report_created"
 )
 

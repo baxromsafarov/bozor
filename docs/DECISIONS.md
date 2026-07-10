@@ -1572,4 +1572,44 @@ Listing — источник истины статуса объявления и
 
 ---
 
+## ADR-045: Отзывы и рейтинги — новый сервис reviews, отзыв привязан к объявлению, таргет=владелец из Listing (нельзя подделать), снятие модератором через reports/takedown → bozor.review.blocked
+
+**Дата:** 2026-07-10
+**Статус:** принято
+**Контекст:** Stage 9.1 (ROADMAP), CHAPTER 9 (Reviews & Ratings). ARCHITECTURE §4.13.
+
+Покупатели оставляют отзывы о продавцах. Отзыв — это оценка (1–5) и текст, привязанные к конкретному объявлению, по которому шло взаимодействие. Нужны: модель отзыва, создание с анти-абьюзом (кто и сколько раз может писать), защита цели от подделки, и снятие оскорбительных отзывов модерацией. Агрегированный рейтинг продавца (кеш) — отдельный Stage 9.2.
+
+### Развилки
+
+**(1) Отдельный сервис `reviews` или отзывы внутри Profile? (новый сервис).**
+Отзывы — самостоятельный ограниченный контекст (own write-model, свои жизненный цикл и модерация), их объём и нагрузка чтения отличаются от профиля. Заводим отдельный сервис `bozor/services/reviews` (БД `bozor_reviews`, dev-порт 8094) — как payments/chat/moderation. Агрегированный рейтинг (Stage 9.2) будет жить кешом в Profile (денормализация под чтение карточки продавца), а `reviews` останется источником истины по отдельным отзывам. Разделение позволяет масштабировать чтение ленты отзывов независимо.
+
+**(2) К чему привязан отзыв и кто его «цель»? (ad_id из запроса; target=владелец объявления, разрешается из Listing — клиент не задаёт).**
+Отзыв ссылается на объявление (`ad_id` в запросе), а **цель отзыва** (о ком он) — владелец этого объявления. Клиент НЕ передаёт `target_id`: сервис читает объявление из Listing `/internal/ads/{id}` (fetch-current-state, ADR-024) и берёт `user_id` владельца как цель. Так нельзя подделать, на кого оставлен отзыв, и нельзя оставить отзыв на несуществующее/чужое присвоенное объявление (нет объявления → `ErrAdNotFound` 404). Автор==владелец → `ErrSelfReview` 409 (нельзя писать отзыв сам себе).
+
+**(3) Анти-абьюз: сколько отзывов на объявление? (один на пару автор×объявление — UNIQUE(ad_id, author_id)).**
+Чтобы исключить накрутку, действует ограничение «один отзыв автора на одно объявление»: `UNIQUE(ad_id, author_id)`; повторная попытка → нарушение 23505 → `ErrDuplicateReview` 409. Оценка валидируется 1..5 (`ErrInvalidRating` 422), тело нормализуется и ограничено 2000 символами (`ErrBodyTooLong` 422). Отзыв анонимно оставить нельзя (POST под `requireAuth`, аноним → 401).
+
+**(4) Модерация отзыва — новый механизм или переиспользовать reports? (переиспользуем POST /reports + takedown).**
+Жалоба на отзыв подаётся существующим `POST /api/v1/reports` (6.4) с `target_type=review` (миграция moderation 00004 расширяет CHECK: `ad|user|message` += `review`). `domain.ValidateAction` теперь допускает `takedown` для `review` (как для ad/message; для user действие — бан). `app.takedownEvent` ветвится: review → `bozor.review.blocked {review_id, reason}`. Консьюмер reviews `reviews-block` на `bozor.review.blocked` (inbox-идемпотентно) → `repo.BlockReview` проставляет `status=blocked`; снятый отзыв скрыт из публичной ленты (`ListByTarget` читает только `status='active'`). Переиспользование reports экономит целый флоу и единообразит модерацию.
+
+### Детали решения
+
+- **Сервис reviews:** миграция 00001 — `reviews` (id, ad_id, author_id, target_id, rating smallint CHECK 1..5, body, status CHECK active|blocked, `UNIQUE(ad_id, author_id)`, `idx_reviews_target`), outbox, processed_events (inbox). Периметр: postgres+миграции+NATS(outbox relay)+otel+metrics+health/ready; Dockerfile distroless.
+- **domain:** `Review`, `StatusActive|StatusBlocked`, `RatingMin=1`/`RatingMax=5`/`MaxBodyLen=2000`, `ValidateRating`/`NormalizeBody`, ошибки `ErrInvalidRating`/`ErrBodyTooLong`/`ErrSelfReview`/`ErrAdNotFound`/`ErrDuplicateReview`/`ErrReviewNotFound`.
+- **app:** `Service.Create` (ValidateRating → NormalizeBody → GetAd из Listing → self-check → target=владелец → `CreateWithEvent` + `bozor.review.created {review_id,ad_id,author_id,target_id,rating}`), `ListByUser`. `listingclient.GetAd` → `/internal/ads/{id}`.
+- **repo:** `CreateWithEvent` (INSERT + событие в outbox одной tx; 23505 → `ErrDuplicateReview`), `ListByTarget` (только active), `BlockReview`, inbox helpers.
+- **worker:** консьюмер `Moderator` (`reviews-block`) на `bozor.review.blocked` → BlockReview.
+- **transport/gateway:** public `GET /api/v1/users/{userID}/reviews`, auth `POST /api/v1/reviews`. Gateway: маршрут `/api/v1/users/{userID}/reviews` → reviews специфичнее catch-all `/api/v1/users` → user-profile (chi отдаёт приоритет статическому сегменту `reviews`). Ошибки: invalid_rating/body_too_long 422, ad_not_found 404, self_review/duplicate_review 409.
+- **moderation:** миграция 00004 (CHECK target_type += review), ValidateAction допускает takedown review, takedownEvent review → `bozor.review.blocked`.
+- **events:** subject `bozor.review.blocked` (+ уже используемый паттерн `bozor.review.created`).
+
+### Последствия
+
+- Продавцы получают отзывы, покупатели — защищённый от подделки цели и накрутки механизм; модерация отзывов переиспользует reports/takedown. Проверено вживую (reviews+moderation+gateway пересобраны healthy, миграции reviews 00001/moderation 00004 applied): (1) **создание** — покупатель `2222…` оставил отзыв (rating 5, UTF-8 тело) на объявление продавца `1111…` через gateway → 201, `target_id` разрешён из Listing = владелец, `bozor.review.created` опубликован (relayed); (2) **лента** — `GET /users/1111…/reviews` → отзыв виден; (3) **анти-абьюз** — повтор того же автора → 409 duplicate_review, отзыв на своё объявление → 409 self_review, rating 0/6 → 422 invalid_rating, аноним → 401, несуществующее объявление → 404 ad_not_found; (4) **модерация** — `POST /reports {target_type:review}` → staff takedown resolve 200 → `bozor.review.blocked` → reviews лог «отзыв снят модератором» → `status=blocked` в БД → `GET /users/1111…/reviews` → `{"reviews":[]}` (снятый скрыт). Unit (domain валидация rating/body; app Create — self/duplicate/not-found/target из Listing; worker Moderator inbox-идемпотентность; transport коды) + integration на testcontainers (CreateWithEvent + `bozor.review.created`, `UNIQUE` → ErrDuplicateReview, ListByTarget скрывает blocked, BlockReview, inbox) — go test PASS (unit + integration 31s reviews); golangci-lint 0 issues (reviews+moderation+gateway); gofmt чисто. Тест-данные (отзыв, жалоба) вычищены, временный JWT-минтер удалён.
+- **Условия пересмотра:** агрегированный рейтинг продавца (кеш `user_ratings_cache` в Profile по `bozor.review.created` + уведомление продавцу) — Stage 9.2; редактирование/удаление отзыва автором, ответ продавца на отзыв, привязка права отзыва к факту сделки (`bozor.ad.sold`/завершённый чат) вместо любого объявления, пагинация ленты курсором, сортировка по свежести/полезности — на будущее; сейчас право отзыва даёт любое существующее объявление продавца (защита — self-review запрет + один на пару автор×объявление).
+
+---
+
 *Конец журнала. Новые решения добавляются в конец с очередным номером ADR.*

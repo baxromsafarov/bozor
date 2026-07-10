@@ -11,6 +11,7 @@ const (
 	TargetAd      = "ad"
 	TargetUser    = "user"
 	TargetMessage = "message"
+	TargetReview  = "review"
 )
 
 // Статусы жалобы.
@@ -24,12 +25,12 @@ const (
 const (
 	ActionDismiss  = "dismiss"  // отклонить жалобу (без последствий)
 	ActionWarn     = "warn"     // предупреждение (информационно)
-	ActionTakedown = "takedown" // снять объявление/сообщение (→ bozor.ad.blocked / bozor.chat.message_blocked)
+	ActionTakedown = "takedown" // снять объект (→ bozor.ad.blocked / bozor.chat.message_blocked / bozor.review.blocked)
 )
 
 // validTargets / validActions — допустимые значения.
 var (
-	validTargets = map[string]bool{TargetAd: true, TargetUser: true, TargetMessage: true}
+	validTargets = map[string]bool{TargetAd: true, TargetUser: true, TargetMessage: true, TargetReview: true}
 	validActions = map[string]bool{ActionDismiss: true, ActionWarn: true, ActionTakedown: true}
 )
 
@@ -37,7 +38,7 @@ var (
 var (
 	ErrInvalidTarget  = errors.New("недопустимый тип объекта жалобы")
 	ErrInvalidAction  = errors.New("недопустимое действие модератора")
-	ErrTakedownTarget = errors.New("снятие применимо к объявлению или сообщению")
+	ErrTakedownTarget = errors.New("снятие применимо к объявлению, сообщению или отзыву")
 )
 
 // Report — жалоба на объявление/пользователя/сообщение.
@@ -65,13 +66,14 @@ func ValidateReportInput(targetType, targetID, reason string) error {
 	return ValidateReason(reason)
 }
 
-// ValidateAction проверяет действие модератора; takedown применим к объявлению
-// или сообщению (не к пользователю — для пользователя есть бан).
+// ValidateAction проверяет действие модератора; takedown применим к объявлению,
+// сообщению или отзыву (не к пользователю — для пользователя есть бан).
 func ValidateAction(action, targetType string) error {
 	if !validActions[action] {
 		return ErrInvalidAction
 	}
-	if action == ActionTakedown && targetType != TargetAd && targetType != TargetMessage {
+	if action == ActionTakedown &&
+		targetType != TargetAd && targetType != TargetMessage && targetType != TargetReview {
 		return ErrTakedownTarget
 	}
 	return nil

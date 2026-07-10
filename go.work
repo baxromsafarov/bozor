@@ -13,6 +13,7 @@ use (
 	./services/moderation
 	./services/notification
 	./services/payments
+	./services/reviews
 	./services/search
 	./services/user-profile
 )

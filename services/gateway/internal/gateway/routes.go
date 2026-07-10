@@ -6,9 +6,13 @@ type Route struct {
 	Service string // имя внутреннего сервиса (совпадает с DNS в сети compose)
 }
 
-// svcFavorites — сервис избранного и сохранённых поисков (обслуживает несколько
-// префиксов, поэтому вынесен в константу).
-const svcFavorites = "favorites-savedsearch"
+// svcFavorites / svcPayments — сервисы, обслуживающие несколько префиксов,
+// поэтому вынесены в константы (единое имя во всех маршрутах).
+const (
+	svcFavorites = "favorites-savedsearch"
+	svcPayments  = "payments-promotions"
+	svcProfile   = "user-profile"
+)
 
 // Routes — таблица маршрутизации внешнего API `/api/v1/*` на внутренние
 // сервисы. Полный путь (с префиксом /api/v1) проксируется как есть —
@@ -19,13 +23,16 @@ const svcFavorites = "favorites-savedsearch"
 // /me/ads уходит в listing-ads, а /me и /me/notification-prefs — в user-profile.
 var Routes = []Route{
 	{Prefix: "/api/v1/auth", Service: "auth"},
-	{Prefix: "/api/v1/users", Service: "user-profile"},
+	// Отзывы о пользователе — более специфичный путь, чем /users (chi отдаёт
+	// приоритет статическому сегменту reviews над catch-all /users/*).
+	{Prefix: "/api/v1/users/{userID}/reviews", Service: "reviews"},
+	{Prefix: "/api/v1/users", Service: svcProfile},
 	// Мои объявления/избранное/сохранённые поиски/кошелёк — более специфичны, чем /me.
 	{Prefix: "/api/v1/me/ads", Service: "listing-ads"},
 	{Prefix: "/api/v1/me/favorites", Service: svcFavorites},
 	{Prefix: "/api/v1/me/saved-searches", Service: svcFavorites},
-	{Prefix: "/api/v1/me/wallet", Service: "payments-promotions"},
-	{Prefix: "/api/v1/me", Service: "user-profile"},
+	{Prefix: "/api/v1/me/wallet", Service: svcPayments},
+	{Prefix: "/api/v1/me", Service: svcProfile},
 	{Prefix: "/api/v1/categories", Service: "catalog"},
 	{Prefix: "/api/v1/attributes", Service: "catalog"},
 	{Prefix: "/api/v1/locations", Service: "location"},
@@ -34,8 +41,8 @@ var Routes = []Route{
 	// search, /ads/{id}/promote — в payments-promotions, а /ads и /ads/{id} — в
 	// listing-ads.
 	{Prefix: "/api/v1/ads/search", Service: "search"},
-	{Prefix: "/api/v1/ads/{adID}/promote", Service: "payments-promotions"},
-	{Prefix: "/api/v1/ads/{adID}/promotions", Service: "payments-promotions"},
+	{Prefix: "/api/v1/ads/{adID}/promote", Service: svcPayments},
+	{Prefix: "/api/v1/ads/{adID}/promotions", Service: svcPayments},
 	{Prefix: "/api/v1/ads", Service: "listing-ads"},
 	{Prefix: "/api/v1/media", Service: "media"},
 	{Prefix: "/api/v1/favorites", Service: svcFavorites},
@@ -45,8 +52,8 @@ var Routes = []Route{
 	{Prefix: "/api/v1/notifications", Service: "notification"},
 	{Prefix: "/api/v1/reports", Service: "moderation"},
 	{Prefix: "/api/v1/moderation", Service: "moderation"},
-	{Prefix: "/api/v1/payments", Service: "payments-promotions"},
-	{Prefix: "/api/v1/promotions", Service: "payments-promotions"},
-	{Prefix: "/api/v1/wallet", Service: "payments-promotions"},
+	{Prefix: "/api/v1/payments", Service: svcPayments},
+	{Prefix: "/api/v1/promotions", Service: svcPayments},
+	{Prefix: "/api/v1/wallet", Service: svcPayments},
 	{Prefix: "/api/v1/reviews", Service: "reviews"},
 }
