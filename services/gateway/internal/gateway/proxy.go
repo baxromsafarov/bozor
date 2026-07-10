@@ -17,18 +17,13 @@ import (
 // headerRequestID — заголовок сквозного идентификатора запроса.
 const headerRequestID = "X-Request-Id"
 
-// newProxyTransport создаёт транспорт для проксирования к апстримам:
-// разумные таймауты плюс автоматическая otel-трассировка исходящих вызовов.
+// newProxyTransport создаёт транспорт для проксирования к апстримам: общий пул
+// keepalive-соединений (httpx.PooledTransport — MaxIdleConnsPerHost=128 против
+// дефолтных 2, чтобы под нагрузкой не выжигать эфемерные порты, выявлено 10.1)
+// плюс потолок ожидания заголовков ответа и otel-трассировка исходящих вызовов.
 func newProxyTransport() http.RoundTripper {
-	base := &http.Transport{
-		Proxy:                 http.ProxyFromEnvironment,
-		MaxIdleConns:          100,
-		MaxIdleConnsPerHost:   16,
-		IdleConnTimeout:       90 * time.Second,
-		TLSHandshakeTimeout:   5 * time.Second,
-		ExpectContinueTimeout: 1 * time.Second,
-		ResponseHeaderTimeout: 30 * time.Second,
-	}
+	base := httpx.PooledTransport()
+	base.ResponseHeaderTimeout = 30 * time.Second
 	return otelhttp.NewTransport(base)
 }
 

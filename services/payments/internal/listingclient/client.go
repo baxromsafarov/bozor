@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"time"
 
+	"bozor/pkg/shared/httpx"
 	"bozor/services/payments/internal/domain"
 )
 
@@ -23,7 +24,7 @@ type Client struct {
 
 // New создаёт клиент Listing с таймаутом на запрос.
 func New(baseURL string, timeout time.Duration) *Client {
-	return &Client{baseURL: baseURL, http: &http.Client{Timeout: timeout}}
+	return &Client{baseURL: baseURL, http: httpx.NewClient(timeout)}
 }
 
 // adDTO — интересующая часть проекции объявления из /internal/ads/{id}.

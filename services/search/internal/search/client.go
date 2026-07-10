@@ -12,6 +12,8 @@ import (
 	"io"
 	"net/http"
 	"time"
+
+	"bozor/pkg/shared/httpx"
 )
 
 // apiKeyHeader — имя HTTP-заголовка аутентификации Typesense (не секрет).
@@ -32,7 +34,9 @@ func New(baseURL, apiKey string, timeout time.Duration) *Client {
 	return &Client{
 		baseURL: baseURL,
 		apiKey:  apiKey,
-		http:    &http.Client{Timeout: timeout},
+		// Пул keepalive-соединений: под нагрузкой каждый поиск делает 2 запроса
+		// к Typesense — дефолтный транспорт (2 idle/host) выжигал бы порты (10.1).
+		http: httpx.NewClient(timeout),
 	}
 }
 

@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"bozor/pkg/shared/httpx"
 	"bozor/services/notification/internal/domain"
 )
 
@@ -33,7 +34,7 @@ type entry struct {
 func New(baseURL string, timeout, ttl time.Duration) *Client {
 	return &Client{
 		baseURL: baseURL,
-		http:    &http.Client{Timeout: timeout},
+		http:    httpx.NewClient(timeout),
 		ttl:     ttl,
 		cache:   make(map[string]entry),
 	}

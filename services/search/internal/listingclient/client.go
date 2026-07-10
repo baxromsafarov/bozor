@@ -12,6 +12,8 @@ import (
 	"net/url"
 	"strconv"
 	"time"
+
+	"bozor/pkg/shared/httpx"
 )
 
 // Attr — значение атрибута объявления (slug из Catalog).
@@ -56,7 +58,7 @@ type Client struct {
 
 // New создаёт клиент Listing с таймаутом на запрос.
 func New(baseURL string, timeout time.Duration) *Client {
-	return &Client{baseURL: baseURL, http: &http.Client{Timeout: timeout}}
+	return &Client{baseURL: baseURL, http: httpx.NewClient(timeout)}
 }
 
 // GetAd возвращает объявление по id. found=false, если объявления нет (404 —
