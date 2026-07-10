@@ -121,11 +121,17 @@ type Ad struct {
 	PublishedAt  *time.Time
 	ExpiresAt    *time.Time
 	BumpedAt     *time.Time
-	ViewsCount   int64
-	CreatedAt    time.Time
-	UpdatedAt    time.Time
-	Attributes   []AdAttributeValue
-	Images       []AdImage
+	// Промо-состояние (Stage 8.6): проставляется по bozor.promotion.activated,
+	// снимается воркером истечения по PromoEndsAt. Search читает эти поля из
+	// Listing (fetch-current-state) и наполняет топ-блок выдачи.
+	IsTop         bool
+	PromotionRank int32 // вес в топ-блоке (unix-секунды окончания промо)
+	PromoEndsAt   *time.Time
+	ViewsCount    int64
+	CreatedAt     time.Time
+	UpdatedAt     time.Time
+	Attributes    []AdAttributeValue
+	Images        []AdImage
 }
 
 // AdAttributeValue — значение атрибута объявления (ключ — slug из Catalog).

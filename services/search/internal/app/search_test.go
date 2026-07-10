@@ -178,14 +178,35 @@ func docHit(id string) search.Hit {
 }
 
 func TestBuildTopParams(t *testing.T) {
-	p := buildTopParams(Query{CategoryID: "cars", RegionID: 14})
+	p := buildTopParams(Query{CategoryID: "cars", RegionID: 14}, 1720000000)
 	assert.Equal(t, "*", p.Q, "топ-блок не зависит от текста")
-	assert.Equal(t, "category_id:=`cars` && region_id:=14 && is_top:=true", p.FilterBy)
+	assert.Equal(t,
+		"category_id:=`cars` && region_id:=14 && is_top:=true && promo_ends_at:>1720000000",
+		p.FilterBy, "фильтры запроса + активные TOP")
 	assert.Equal(t, "promotion_rank:desc,created_at:desc", p.SortBy)
-	assert.Equal(t, TopBlockSize, p.PerPage)
+	assert.Equal(t, topCandidatePool, p.PerPage, "набирается пул кандидатов для ротации")
 
-	// Без фильтров — только is_top.
-	assert.Equal(t, "is_top:=true", buildTopParams(Query{}).FilterBy)
+	// Без фильтров — только активные TOP.
+	assert.Equal(t, "is_top:=true && promo_ends_at:>1720000000", buildTopParams(Query{}, 1720000000).FilterBy)
+}
+
+func TestRotateTop(t *testing.T) {
+	// Пул больше блока → возвращается ровно TopBlockSize, все из пула.
+	pool := []AdHit{{ID: "a"}, {ID: "b"}, {ID: "c"}, {ID: "d"}, {ID: "e"}, {ID: "f"}, {ID: "g"}}
+	got := rotateTop(pool)
+	require.Len(t, got, TopBlockSize)
+	valid := map[string]bool{"a": true, "b": true, "c": true, "d": true, "e": true, "f": true, "g": true}
+	seen := map[string]bool{}
+	for _, h := range got {
+		assert.True(t, valid[h.ID], "объявление из пула кандидатов")
+		assert.False(t, seen[h.ID], "без повторов")
+		seen[h.ID] = true
+	}
+
+	// Пул не больше блока → возвращается как есть (по количеству).
+	small := []AdHit{{ID: "x"}, {ID: "y"}}
+	assert.Len(t, rotateTop(small), 2)
+	assert.Empty(t, rotateTop(nil))
 }
 
 func TestService_Search_TopBlockOnFirstPage(t *testing.T) {

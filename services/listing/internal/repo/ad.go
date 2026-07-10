@@ -20,7 +20,8 @@ import (
 
 const adColumns = `id, user_id, category_id, title, description, price, currency,
 	region_id, city_id, lat, lng, status, phone_display, published_at,
-	expires_at, bumped_at, views_count, created_at, updated_at`
+	expires_at, bumped_at, is_top, promotion_rank, promo_ends_at,
+	views_count, created_at, updated_at`
 
 // Repo — репозиторий объявлений.
 type Repo struct {
@@ -221,6 +222,83 @@ func (r *Repo) BumpWithEvent(ctx context.Context, adID string, bumpedAt time.Tim
 		return outbox.Enqueue(ctx, tx, ev)
 	})
 	return bumped, err
+}
+
+// SetPromotionWithEvent проставляет промо-флаги (is_top, promotion_rank,
+// promo_ends_at) активному объявлению и публикует bozor.ad.updated в outbox —
+// одной транзакцией. Только active-объявление продвигается (гонка с истечением/
+// снятием исключена условием status='active'). Возвращает false без события, если
+// объявления нет или оно не активно. Триггерится консьюмером bozor.promotion.activated
+// (Stage 8.6); Listing — владелец промо-полей, поэтому он же публикует событие,
+// чтобы индексатор Search прочитал уже обновлённое состояние (fetch-current-state).
+// Идемпотентно по эффекту: повторная доставка выставит те же значения.
+func (r *Repo) SetPromotionWithEvent(ctx context.Context, adID string, rank int32, endsAt *time.Time, ev events.Envelope) (bool, error) {
+	var applied bool
+	err := pgxx.WithTx(ctx, r.pool, func(tx pgx.Tx) error {
+		tag, err := tx.Exec(ctx, `
+			UPDATE ads SET is_top = true, promotion_rank = $2, promo_ends_at = $3, updated_at = now()
+			WHERE id = $1 AND status = 'active'
+		`, adID, rank, endsAt)
+		if err != nil {
+			return fmt.Errorf("repo: проставление промо: %w", err)
+		}
+		if tag.RowsAffected() == 0 {
+			return nil // нет объявления или не активно — пропуск без события
+		}
+		applied = true
+		return outbox.Enqueue(ctx, tx, ev)
+	})
+	return applied, err
+}
+
+// ListExpiredPromos возвращает продвинутые объявления с истёкшим промо
+// (is_top AND promo_ends_at <= now) — кандидаты на снятие TOP (не более limit за
+// проход). Дочерние сущности не читаются: воркеру нужны лишь поля события.
+func (r *Repo) ListExpiredPromos(ctx context.Context, now time.Time, limit int) ([]domain.Ad, error) {
+	rows, err := r.pool.Query(ctx, `SELECT `+adColumns+`
+		FROM ads WHERE is_top = true AND promo_ends_at IS NOT NULL AND promo_ends_at <= $1
+		ORDER BY promo_ends_at LIMIT $2`, now, limit)
+	if err != nil {
+		return nil, fmt.Errorf("repo: выборка истёкших промо: %w", err)
+	}
+	defer rows.Close()
+
+	var out []domain.Ad
+	for rows.Next() {
+		a, err := scanAd(rows)
+		if err != nil {
+			return nil, fmt.Errorf("repo: чтение объявления с истёкшим промо: %w", err)
+		}
+		out = append(out, a)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("repo: перебор истёкших промо: %w", err)
+	}
+	return out, nil
+}
+
+// ClearPromotionWithEvent снимает промо-флаги (is_top=false, promotion_rank=0,
+// promo_ends_at=NULL) и публикует bozor.ad.updated одной транзакцией. Условие
+// promo_ends_at <= now() перепроверяется в UPDATE: только что продлённое промо не
+// будет снято гонкой. Возвращает true, если флаг действительно снят (иначе —
+// пропуск без события).
+func (r *Repo) ClearPromotionWithEvent(ctx context.Context, adID string, ev events.Envelope) (bool, error) {
+	var cleared bool
+	err := pgxx.WithTx(ctx, r.pool, func(tx pgx.Tx) error {
+		tag, err := tx.Exec(ctx, `
+			UPDATE ads SET is_top = false, promotion_rank = 0, promo_ends_at = NULL, updated_at = now()
+			WHERE id = $1 AND is_top = true AND promo_ends_at IS NOT NULL AND promo_ends_at <= now()
+		`, adID)
+		if err != nil {
+			return fmt.Errorf("repo: снятие промо: %w", err)
+		}
+		if tag.RowsAffected() == 0 {
+			return nil // уже снято или продлено — пропуск
+		}
+		cleared = true
+		return outbox.Enqueue(ctx, tx, ev)
+	})
+	return cleared, err
 }
 
 // AddViews прибавляет накопленные просмотры к объявлениям одним batch-UPDATE
@@ -468,7 +546,8 @@ func scanAd(row pgx.Row) (domain.Ad, error) {
 	)
 	err := row.Scan(&a.ID, &a.UserID, &a.CategoryID, &a.Title, &a.Description, &a.Price, &a.Currency,
 		&a.RegionID, &a.CityID, &a.Lat, &a.Lng, &status, &a.PhoneDisplay, &a.PublishedAt,
-		&a.ExpiresAt, &a.BumpedAt, &a.ViewsCount, &a.CreatedAt, &a.UpdatedAt)
+		&a.ExpiresAt, &a.BumpedAt, &a.IsTop, &a.PromotionRank, &a.PromoEndsAt,
+		&a.ViewsCount, &a.CreatedAt, &a.UpdatedAt)
 	a.Status = domain.Status(status)
 	return a, err
 }

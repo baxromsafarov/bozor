@@ -137,6 +137,17 @@ func run() error {
 	}
 	defer cc.Stop()
 
+	// Консьюмер активаций продвижения: bozor.promotion.activated → is_top/
+	// promotion_rank/promo_ends_at на объявлении, публикует bozor.ad.updated
+	// (Stage 8.6). До 3 попыток, затем DLQ; идемпотентно по эффекту (inbox не нужен).
+	promoter := worker.NewPromoter(adRepo, log)
+	pc, err := natsx.Consume(ctx, js, events.StreamName, worker.PromotionConsumer,
+		[]string{events.SubjectPromotionActivated}, 3, promoter.Handle)
+	if err != nil {
+		return fmt.Errorf("консьюмер активаций продвижения: %w", err)
+	}
+	defer pc.Stop()
+
 	// Воркер истечения срока: active → expired по expires_at, публикует bozor.ad.expired.
 	expirer := worker.NewExpirer(adRepo, cfg.ExpireInterval, cfg.ExpireBatch, log)
 	wg.Add(1)

@@ -37,6 +37,10 @@ type Ad struct {
 	Attributes  []Attr   `json:"attributes"`
 	CreatedAt   string   `json:"created_at"`
 	BumpedAt    string   `json:"bumped_at"`
+	// Промо-состояние для топ-блока Search (Stage 8.6).
+	IsTop         bool   `json:"is_top"`
+	PromotionRank int32  `json:"promotion_rank"`
+	PromoEndsAt   string `json:"promo_ends_at"`
 }
 
 type exportListResponse struct {

@@ -8,9 +8,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math/rand/v2"
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"bozor/services/search/internal/search"
 )
@@ -23,10 +25,13 @@ const (
 	// queryByFields — поля полнотекста; заголовок весомее описания.
 	queryByFields  = "title,description"
 	queryByWeights = "2,1"
-	// TopBlockSize — максимум TOP-объявлений в топ-блоке выдачи (заглушка до
-	// Promotions, CHAPTER 8; ротация «макс. 5 на категорию» — Stage 8.6).
+	// TopBlockSize — сколько TOP-объявлений показываем в топ-блоке выдачи.
 	TopBlockSize = 5
-	// topSort — порядок топ-блока: выше promotion_rank, затем свежесть.
+	// topCandidatePool — из скольких активных TOP-объявлений (отсортированных по
+	// promotion_rank) выбираются случайные TopBlockSize. Ротация даёт всем
+	// продвинутым объявлениям равные шансы показа (Stage 8.6).
+	topCandidatePool = 50
+	// topSort — порядок пула кандидатов: выше promotion_rank, затем свежесть.
 	topSort = "promotion_rank:desc,created_at:desc"
 )
 
@@ -139,13 +144,27 @@ func (s *Service) Search(ctx context.Context, q Query) (Result, error) {
 }
 
 // topBlock возвращает TOP-объявления, релевантные фильтрам запроса (без учёта
-// текста — это врезка промо по категории/региону, а не полнотекст).
+// текста — это врезка промо по категории/региону, а не полнотекст). Из пула
+// активных TOP выбираются случайные TopBlockSize (ротация, Stage 8.6).
 func (s *Service) topBlock(ctx context.Context, q Query) ([]AdHit, error) {
-	res, err := s.docs.Search(ctx, search.AdsCollection, buildTopParams(q))
+	res, err := s.docs.Search(ctx, search.AdsCollection, buildTopParams(q, time.Now().Unix()))
 	if err != nil {
 		return nil, err
 	}
-	return decodeHits(res.Hits), nil
+	return rotateTop(decodeHits(res.Hits)), nil
+}
+
+// rotateTop перемешивает пул кандидатов и возвращает не более TopBlockSize — так
+// топ-блок ротируется между всеми активными TOP-объявлениями, а не показывает
+// всегда одни и те же по promotion_rank.
+func rotateTop(hits []AdHit) []AdHit {
+	if len(hits) > 1 {
+		rand.Shuffle(len(hits), func(i, j int) { hits[i], hits[j] = hits[j], hits[i] })
+	}
+	if len(hits) > TopBlockSize {
+		hits = hits[:TopBlockSize]
+	}
+	return hits
 }
 
 // Facets возвращает фасетное распределение по тем же фильтрам (без выборки
@@ -182,14 +201,17 @@ func buildParams(q Query, facetsOnly bool) search.SearchParams {
 	return p
 }
 
-// buildTopParams собирает запрос топ-блока: фильтры запроса плюс is_top:=true,
-// сортировка по промо-рангу, без учёта текста (q='*').
-func buildTopParams(q Query) search.SearchParams {
+// buildTopParams собирает запрос пула кандидатов топ-блока: фильтры запроса плюс
+// is_top:=true и promo_ends_at:>now (только активные промо — истёкшие Listing ещё
+// не снял, либо снятие в пути), сортировка по промо-рангу, без учёта текста (q='*').
+// Набирает до topCandidatePool кандидатов — из них topBlock берёт случайные.
+func buildTopParams(q Query, now int64) search.SearchParams {
+	promo := "is_top:=true && promo_ends_at:>" + strconv.FormatInt(now, 10)
 	filter := buildFilter(q)
 	if filter != "" {
-		filter += " && is_top:=true"
+		filter += " && " + promo
 	} else {
-		filter = "is_top:=true"
+		filter = promo
 	}
 	return search.SearchParams{
 		Q:              "*",
@@ -198,7 +220,7 @@ func buildTopParams(q Query) search.SearchParams {
 		FilterBy:       filter,
 		SortBy:         topSort,
 		Page:           1,
-		PerPage:        TopBlockSize,
+		PerPage:        topCandidatePool,
 	}
 }
 

@@ -88,6 +88,24 @@ func TestHandle_ActiveUpserts(t *testing.T) {
 	assert.Empty(t, docs.deleted)
 }
 
+func TestHandle_PromoFieldsMapped(t *testing.T) {
+	docs := &fakeDocs{}
+	ad := activeAd()
+	ad.IsTop = true
+	ad.PromotionRank = 1783641600
+	ad.PromoEndsAt = "2026-08-08T10:00:00Z"
+	src := &fakeSource{ad: ad, found: true}
+	err := New(docs, src, discardLogger()).Handle(context.Background(), evt(t, events.SubjectAdUpdated, "ad-1"))
+	require.NoError(t, err)
+	require.Len(t, docs.upserted, 1)
+	d := docs.upserted[0]
+	assert.True(t, d.IsTop, "промо-флаг в индексе")
+	assert.Equal(t, int32(1783641600), d.PromotionRank)
+	wantEnds, _ := time.Parse(time.RFC3339, "2026-08-08T10:00:00Z")
+	require.NotNil(t, d.PromoEndsAt)
+	assert.Equal(t, wantEnds.Unix(), *d.PromoEndsAt, "promo_ends_at в unix")
+}
+
 func TestHandle_NonActiveDeletes(t *testing.T) {
 	docs := &fakeDocs{}
 	ad := activeAd()

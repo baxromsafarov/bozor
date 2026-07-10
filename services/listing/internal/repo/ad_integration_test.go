@@ -142,6 +142,67 @@ func TestListingRepo_BumpWithEvent(t *testing.T) {
 	assert.Equal(t, 1, countSubject(t, ctx, pool, events.SubjectAdBumped), "без события для неактивного")
 }
 
+func TestListingRepo_Promotion(t *testing.T) {
+	ctx := context.Background()
+	pool := startDB(t)
+	r := repo.NewRepo(pool)
+
+	// Активное объявление продвигается: is_top/promotion_rank/promo_ends_at
+	// выставлены, bozor.ad.updated в outbox.
+	active := seedAd(t, ctx, r, domain.StatusActive, nil)
+	ends := time.Now().UTC().Add(7 * 24 * time.Hour).Truncate(time.Second)
+	applied, err := r.SetPromotionWithEvent(ctx, active.ID, int32(ends.Unix()), &ends,
+		eventOf(t, events.SubjectAdUpdated, active.ID))
+	require.NoError(t, err)
+	assert.True(t, applied)
+
+	got, err := r.GetByID(ctx, active.ID)
+	require.NoError(t, err)
+	assert.True(t, got.IsTop, "промо-флаг выставлен")
+	assert.Equal(t, int32(ends.Unix()), got.PromotionRank)
+	require.NotNil(t, got.PromoEndsAt)
+	assert.WithinDuration(t, ends, got.PromoEndsAt.UTC(), time.Second)
+	assert.Equal(t, 1, countSubject(t, ctx, pool, events.SubjectAdUpdated))
+
+	// Неактивное (draft) не продвигается: false, без события.
+	draft := seedAd(t, ctx, r, domain.StatusDraft, nil)
+	applied, err = r.SetPromotionWithEvent(ctx, draft.ID, 1, &ends, eventOf(t, events.SubjectAdUpdated, draft.ID))
+	require.NoError(t, err)
+	assert.False(t, applied, "неактивное объявление не продвигается")
+	assert.Equal(t, 1, countSubject(t, ctx, pool, events.SubjectAdUpdated), "без события для неактивного")
+
+	// ListExpiredPromos: продвинутое объявление с истёкшим промо — кандидат на снятие.
+	past := time.Now().UTC().Add(-time.Hour).Truncate(time.Second)
+	expiring := seedAd(t, ctx, r, domain.StatusActive, nil)
+	_, err = r.SetPromotionWithEvent(ctx, expiring.ID, int32(past.Unix()), &past, eventOf(t, events.SubjectAdUpdated, expiring.ID))
+	require.NoError(t, err)
+
+	expired, err := r.ListExpiredPromos(ctx, time.Now().UTC(), 100)
+	require.NoError(t, err)
+	ids := make(map[string]bool, len(expired))
+	for _, a := range expired {
+		ids[a.ID] = true
+	}
+	assert.True(t, ids[expiring.ID], "истёкшее промо в выборке")
+	assert.False(t, ids[active.ID], "будущее промо не в выборке")
+
+	// ClearPromotionWithEvent снимает флаг и публикует событие.
+	cleared, err := r.ClearPromotionWithEvent(ctx, expiring.ID, eventOf(t, events.SubjectAdUpdated, expiring.ID))
+	require.NoError(t, err)
+	assert.True(t, cleared)
+
+	gotCleared, err := r.GetByID(ctx, expiring.ID)
+	require.NoError(t, err)
+	assert.False(t, gotCleared.IsTop, "промо снято")
+	assert.Zero(t, gotCleared.PromotionRank)
+	assert.Nil(t, gotCleared.PromoEndsAt)
+
+	// Повторное снятие: флага уже нет — false, без второго события по этому объявлению.
+	cleared, err = r.ClearPromotionWithEvent(ctx, expiring.ID, eventOf(t, events.SubjectAdUpdated, expiring.ID))
+	require.NoError(t, err)
+	assert.False(t, cleared, "повторное снятие — no-op")
+}
+
 func TestListingRepo_ApplyModeration_Idempotent(t *testing.T) {
 	ctx := context.Background()
 	pool := startDB(t)

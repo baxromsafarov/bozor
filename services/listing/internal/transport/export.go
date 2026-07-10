@@ -36,6 +36,10 @@ type exportAd struct {
 	PublishedAt string         `json:"published_at,omitempty"`
 	ExpiresAt   string         `json:"expires_at,omitempty"`
 	BumpedAt    string         `json:"bumped_at,omitempty"`
+	// Промо-состояние для топ-блока Search (Stage 8.6).
+	IsTop         bool   `json:"is_top"`
+	PromotionRank int32  `json:"promotion_rank"`
+	PromoEndsAt   string `json:"promo_ends_at,omitempty"`
 }
 
 type exportListResponse struct {
@@ -95,11 +99,14 @@ func toExport(a domain.Ad) exportAd {
 		ID: a.ID, UserID: a.UserID, CategoryID: a.CategoryID, Title: a.Title, Description: a.Description,
 		Price: a.Price, Currency: a.Currency, RegionID: a.RegionID, CityID: a.CityID, Lat: a.Lat, Lng: a.Lng,
 		Status: string(a.Status), ViewsCount: a.ViewsCount,
-		Attributes:  make([]attributeDTO, 0, len(a.Attributes)),
-		CreatedAt:   a.CreatedAt.UTC().Format(time.RFC3339),
-		PublishedAt: formatTime(a.PublishedAt),
-		ExpiresAt:   formatTime(a.ExpiresAt),
-		BumpedAt:    formatTime(a.BumpedAt),
+		Attributes:    make([]attributeDTO, 0, len(a.Attributes)),
+		CreatedAt:     a.CreatedAt.UTC().Format(time.RFC3339),
+		PublishedAt:   formatTime(a.PublishedAt),
+		ExpiresAt:     formatTime(a.ExpiresAt),
+		BumpedAt:      formatTime(a.BumpedAt),
+		IsTop:         a.IsTop,
+		PromotionRank: a.PromotionRank,
+		PromoEndsAt:   formatTime(a.PromoEndsAt),
 	}
 	for _, v := range a.Attributes {
 		e.Attributes = append(e.Attributes, attributeDTO{Slug: v.AttributeSlug, Value: v.Value})

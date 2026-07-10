@@ -114,20 +114,22 @@ func (ix *Indexer) Reindex(ctx context.Context) (int, error) {
 
 // adDoc — документ коллекции ads Typesense (проекция объявления).
 type adDoc struct {
-	ID          string            `json:"id"`
-	Title       string            `json:"title"`
-	Description string            `json:"description,omitempty"`
-	CategoryID  string            `json:"category_id"`
-	RegionID    int32             `json:"region_id"`
-	CityID      *int64            `json:"city_id,omitempty"`
-	Price       int64             `json:"price"`
-	Currency    string            `json:"currency"`
-	Status      string            `json:"status"`
-	Attrs       map[string]string `json:"attrs,omitempty"`
-	CreatedAt   int64             `json:"created_at"`
-	BumpedAt    *int64            `json:"bumped_at,omitempty"`
-	IsTop       bool              `json:"is_top"`
-	Location    []float64         `json:"location,omitempty"`
+	ID            string            `json:"id"`
+	Title         string            `json:"title"`
+	Description   string            `json:"description,omitempty"`
+	CategoryID    string            `json:"category_id"`
+	RegionID      int32             `json:"region_id"`
+	CityID        *int64            `json:"city_id,omitempty"`
+	Price         int64             `json:"price"`
+	Currency      string            `json:"currency"`
+	Status        string            `json:"status"`
+	Attrs         map[string]string `json:"attrs,omitempty"`
+	CreatedAt     int64             `json:"created_at"`
+	BumpedAt      *int64            `json:"bumped_at,omitempty"`
+	IsTop         bool              `json:"is_top"`
+	PromotionRank int32             `json:"promotion_rank,omitempty"`
+	PromoEndsAt   *int64            `json:"promo_ends_at,omitempty"`
+	Location      []float64         `json:"location,omitempty"`
 }
 
 // buildDoc строит документ Typesense из проекции объявления Listing.
@@ -140,6 +142,7 @@ func buildDoc(ad listingclient.Ad) (adDoc, error) {
 		ID: ad.ID, Title: ad.Title, Description: ad.Description, CategoryID: ad.CategoryID,
 		RegionID: ad.RegionID, CityID: ad.CityID, Price: ad.Price, Currency: ad.Currency,
 		Status: ad.Status, CreatedAt: created,
+		IsTop: ad.IsTop, PromotionRank: ad.PromotionRank,
 	}
 	if len(ad.Attributes) > 0 {
 		doc.Attrs = make(map[string]string, len(ad.Attributes))
@@ -150,6 +153,11 @@ func buildDoc(ad listingclient.Ad) (adDoc, error) {
 	if ad.BumpedAt != "" {
 		if b, err := unixFromRFC3339(ad.BumpedAt); err == nil {
 			doc.BumpedAt = &b
+		}
+	}
+	if ad.PromoEndsAt != "" {
+		if e, err := unixFromRFC3339(ad.PromoEndsAt); err == nil {
+			doc.PromoEndsAt = &e
 		}
 	}
 	if ad.Lat != nil && ad.Lng != nil {

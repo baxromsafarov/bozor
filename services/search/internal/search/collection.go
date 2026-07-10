@@ -54,6 +54,8 @@ func AdsSchema() CollectionSchema {
 			{Name: "bumped_at", Type: typeInt64, Sort: true, Optional: true},
 			{Name: "is_top", Type: typeBool, Facet: true},
 			{Name: "promotion_rank", Type: typeInt32, Sort: true, Optional: true},
+			// Момент окончания промо (unix-сек) — фильтр «активные TOP» топ-блока (8.6).
+			{Name: "promo_ends_at", Type: typeInt64, Optional: true},
 			{Name: "location", Type: typeGeopoint, Optional: true},
 		},
 		DefaultSortingField: "created_at",
