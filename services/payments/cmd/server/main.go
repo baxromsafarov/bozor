@@ -138,6 +138,19 @@ func run() error {
 		}
 	}()
 
+	// Консьюмер жизненного цикла объявлений (Stage 8.7): истечение → приостановка
+	// услуг, реактивация → возобновление (сдвиг срока на простой + восстановление
+	// TOP), снятие/удаление → пропорциональный возврат неиспользованных дней.
+	// До 3 попыток, затем DLQ; идемпотентно по эффекту (inbox не нужен).
+	lifecycle := worker.NewLifecycle(app.NewLifecycleService(store, log), log)
+	lc, err := natsx.Consume(ctx, js, events.StreamName, worker.LifecycleConsumer,
+		[]string{events.SubjectAdExpired, events.SubjectAdBlocked, events.SubjectAdDeleted, events.SubjectAdUpdated},
+		3, lifecycle.Handle)
+	if err != nil {
+		return fmt.Errorf("консьюмер жизненного цикла объявлений: %w", err)
+	}
+	defer lc.Stop()
+
 	router := transport.NewRouter(transport.Deps{
 		Log:            log,
 		Catalog:        transport.NewCatalogHandler(app.NewService(store, log), log),

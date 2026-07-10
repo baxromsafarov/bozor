@@ -3,6 +3,8 @@ package repo
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 
@@ -95,11 +97,89 @@ func (r *Repo) ReleaseBump(ctx context.Context, promotionID string, dayOffset in
 	return err
 }
 
+// SuspendPromotions приостанавливает активные услуги объявления (freeze при
+// истечении объявления): active → suspended, фиксируя suspended_at. Возвращает
+// число приостановленных. Идемпотентно: уже приостановленные/иные не затрагиваются.
+func (r *Repo) SuspendPromotions(ctx context.Context, adID string, now time.Time) (int, error) {
+	tag, err := r.pool.Exec(ctx, `
+		UPDATE ad_promotions SET status = 'suspended', suspended_at = $2
+		WHERE ad_id = $1 AND status = 'active'`, adID, now)
+	if err != nil {
+		return 0, fmt.Errorf("repo: приостановка услуг: %w", err)
+	}
+	return int(tag.RowsAffected()), nil
+}
+
+// ResumePromotions возобновляет приостановленные услуги при реактивации
+// объявления: suspended → active, сдвигая ends_at вперёд на длительность простоя
+// (now − suspended_at) и очищая suspended_at. Если передан ev (среди услуг был
+// TOP) — публикует его в outbox одной транзакцией (восстановление is_top/срока в
+// Search). Возвращает false без изменений, если приостановленных услуг нет.
+func (r *Repo) ResumePromotions(ctx context.Context, adID string, now time.Time, ev *events.Envelope) (bool, error) {
+	var resumed bool
+	err := pgxx.WithTx(ctx, r.pool, func(tx pgx.Tx) error {
+		tag, err := tx.Exec(ctx, `
+			UPDATE ad_promotions
+			SET status = 'active',
+			    ends_at = CASE WHEN ends_at IS NOT NULL THEN ends_at + ($2 - suspended_at) ELSE ends_at END,
+			    suspended_at = NULL
+			WHERE ad_id = $1 AND status = 'suspended'`, adID, now)
+		if err != nil {
+			return fmt.Errorf("repo: возобновление услуг: %w", err)
+		}
+		if tag.RowsAffected() == 0 {
+			return nil // нечего возобновлять
+		}
+		resumed = true
+		if ev != nil {
+			return outbox.Enqueue(ctx, tx, *ev)
+		}
+		return nil
+	})
+	return resumed, err
+}
+
+// RefundPromotions завершает услуги снятого/удалённого объявления возвратом
+// неиспользованного срока: active|suspended → refunded (refunded_at=now). Если
+// amount>0 — той же транзакцией зачисляет возврат на кошелёк (kind=refund) и
+// публикует bozor.wallet.refunded. Возвращает false без изменений, если завершать
+// нечего. Идемпотентно: повторная доставка не находит active/suspended услуг.
+func (r *Repo) RefundPromotions(ctx context.Context, adID, userID string, amount int64, reason string) (bool, error) {
+	var done bool
+	err := pgxx.WithTx(ctx, r.pool, func(tx pgx.Tx) error {
+		tag, err := tx.Exec(ctx, `
+			UPDATE ad_promotions SET status = 'refunded', refunded_at = now()
+			WHERE ad_id = $1 AND status IN ('active', 'suspended')`, adID)
+		if err != nil {
+			return fmt.Errorf("repo: возврат услуг: %w", err)
+		}
+		if tag.RowsAffected() == 0 {
+			return nil // нет активных/приостановленных — завершать нечего
+		}
+		done = true
+		if amount <= 0 {
+			return nil // срок полностью использован — возврат не начисляется
+		}
+		ref := adID
+		if _, err := creditTx(ctx, tx, userID, amount, domain.KindRefund, &ref); err != nil {
+			return err
+		}
+		ev, err := events.New(events.SubjectWalletRefunded, "payments", walletEventPayload{
+			UserID: userID, Amount: amount, Currency: domain.CurrencyUZS, Reason: reason,
+		})
+		if err != nil {
+			return fmt.Errorf("repo: событие возврата: %w", err)
+		}
+		return outbox.Enqueue(ctx, tx, ev)
+	})
+	return done, err
+}
+
 // ListAdPromotions возвращает услуги объявления указанного статуса (свежие сверху).
 func (r *Repo) ListAdPromotions(ctx context.Context, adID, status string) ([]domain.AdPromotion, error) {
 	rows, err := r.pool.Query(ctx, `
 		SELECT id, ad_id, user_id, service_code, bundle_code, status, amount_uzs,
-		       starts_at, ends_at, schedule_json, created_at
+		       starts_at, ends_at, schedule_json, suspended_at, refunded_at, created_at
 		FROM ad_promotions
 		WHERE ad_id = $1 AND ($2 = '' OR status = $2)
 		ORDER BY created_at DESC`, adID, status)
@@ -115,7 +195,7 @@ func (r *Repo) ListAdPromotions(ctx context.Context, adID, status string) ([]dom
 			schedule []byte
 		)
 		if err := rows.Scan(&p.ID, &p.AdID, &p.UserID, &p.ServiceCode, &p.BundleCode, &p.Status,
-			&p.AmountUZS, &p.StartsAt, &p.EndsAt, &schedule, &p.CreatedAt); err != nil {
+			&p.AmountUZS, &p.StartsAt, &p.EndsAt, &schedule, &p.SuspendedAt, &p.RefundedAt, &p.CreatedAt); err != nil {
 			return nil, err
 		}
 		if len(schedule) > 0 {

@@ -57,7 +57,42 @@ type AdPromotion struct {
 	StartsAt    time.Time
 	EndsAt      *time.Time
 	Schedule    []int
+	SuspendedAt *time.Time // момент приостановки (freeze при истечении объявления)
+	RefundedAt  *time.Time // момент возврата (снятие/удаление объявления)
 	CreatedAt   time.Time
+}
+
+// RefundAmount возвращает пропорциональную стоимость неиспользованного срока
+// услуги на момент отмены: amount × remaining / total (целочисленно, вниз).
+// Услуги без срока (EndsAt=nil, напр. BUMP) и уже истёкшие возврату не подлежат.
+// Для приостановленной услуги «остаток» отсчитывается от момента заморозки
+// (SuspendedAt), а не от now — простой в статусе suspended не съедает срок.
+func RefundAmount(p AdPromotion, now time.Time) int64 {
+	if p.EndsAt == nil || p.AmountUZS <= 0 {
+		return 0
+	}
+	total := p.EndsAt.Sub(p.StartsAt)
+	if total <= 0 {
+		return 0
+	}
+	asOf := now
+	if p.Status == PromotionSuspended && p.SuspendedAt != nil {
+		asOf = *p.SuspendedAt
+	}
+	remaining := p.EndsAt.Sub(asOf)
+	switch {
+	case remaining <= 0:
+		return 0
+	case remaining > total:
+		remaining = total
+	}
+	// Считаем в секундах: amount×remaining в наносекундах переполнило бы int64.
+	totalSec := int64(total / time.Second)
+	if totalSec <= 0 {
+		return 0
+	}
+	remSec := int64(remaining / time.Second)
+	return p.AmountUZS * remSec / totalSec
 }
 
 // PromotionItem — один элемент плана применения: услуга с её сроком (EndsAt) или
