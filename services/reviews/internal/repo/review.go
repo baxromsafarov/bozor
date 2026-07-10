@@ -71,6 +71,21 @@ func (r *Repo) ListByTarget(ctx context.Context, targetID string, limit, offset 
 	return out, rows.Err()
 }
 
+// AggregateRating возвращает агрегат рейтинга продавца по активным отзывам
+// (средняя оценка и количество). Снятые (blocked) отзывы не учитываются. Нет
+// отзывов → нулевой рейтинг (0/0). Источник истины для кеша Profile (9.2).
+func (r *Repo) AggregateRating(ctx context.Context, targetID string) (domain.Rating, error) {
+	var rt domain.Rating
+	err := r.pool.QueryRow(ctx, `
+		SELECT COUNT(*), COALESCE(AVG(rating), 0)
+		FROM reviews WHERE target_id = $1 AND status = 'active'`, targetID).
+		Scan(&rt.ReviewsCount, &rt.AvgRating)
+	if err != nil {
+		return domain.Rating{}, fmt.Errorf("repo: агрегат рейтинга %s: %w", targetID, err)
+	}
+	return rt, nil
+}
+
 // BlockReview скрывает отзыв (status → blocked) по решению модерации. Идемпотентно:
 // повторное снятие не затрагивает уже снятый отзыв.
 func (r *Repo) BlockReview(ctx context.Context, reviewID string) error {

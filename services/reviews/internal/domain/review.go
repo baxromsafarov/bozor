@@ -50,6 +50,13 @@ type AdView struct {
 	Status string
 }
 
+// Rating — агрегат рейтинга продавца по активным отзывам (для кеша в Profile 9.2).
+// Считается по status='active' — снятые модератором отзывы в рейтинг не входят.
+type Rating struct {
+	AvgRating    float64
+	ReviewsCount int
+}
+
 // ValidateRating проверяет оценку (целое 1..5).
 func ValidateRating(rating int) error {
 	if rating < RatingMin || rating > RatingMax {

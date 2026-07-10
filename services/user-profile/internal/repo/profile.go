@@ -94,6 +94,31 @@ func (r *Repo) UpdateProfileWithEvent(ctx context.Context, p domain.Profile, ev 
 	})
 }
 
+// UpsertRatingWithInbox обновляет кеш рейтинга продавца и отмечает событие
+// bozor.review.created обработанным (inbox) одной транзакцией. Значения —
+// пересчитанный агрегат из Reviews (fetch-current-state). Профиль продавца при
+// необходимости создаётся по умолчанию (FK user_ratings_cache → profiles;
+// продавец мог ещё не открывать /me). Идемпотентно: UPSERT к текущему агрегату +
+// MarkProcessed; повторная доставка отсекается inbox (проверяется до вызова).
+func (r *Repo) UpsertRatingWithInbox(ctx context.Context, def domain.Profile, rt domain.Rating, consumer, eventID string) error {
+	return pgxx.WithTx(ctx, r.pool, func(tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, insertProfile,
+			def.UserID, string(def.UserType), def.ContactPhoneVisible, def.LanguageCode, def.CreatedAt, def.UpdatedAt); err != nil {
+			return fmt.Errorf("repo: создание профиля продавца: %w", err)
+		}
+		_, err := tx.Exec(ctx, `
+			INSERT INTO user_ratings_cache (user_id, avg_rating, reviews_count, updated_at)
+			VALUES ($1, $2, $3, now())
+			ON CONFLICT (user_id) DO UPDATE
+			SET avg_rating = excluded.avg_rating, reviews_count = excluded.reviews_count, updated_at = now()`,
+			def.UserID, rt.AvgRating, rt.ReviewsCount)
+		if err != nil {
+			return fmt.Errorf("repo: обновление кеша рейтинга: %w", err)
+		}
+		return outbox.MarkProcessed(ctx, tx, consumer, eventID)
+	})
+}
+
 // GetRating возвращает кеш рейтинга (нулевой при отсутствии — отзывов ещё нет).
 func (r *Repo) GetRating(ctx context.Context, userID string) (domain.Rating, error) {
 	var rt domain.Rating

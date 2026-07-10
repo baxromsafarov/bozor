@@ -157,6 +157,40 @@ func TestRepo_GetRating_ZeroWhenAbsent(t *testing.T) {
 	assert.Equal(t, 0, rt.ReviewsCount)
 }
 
+func TestRepo_UpsertRatingWithInbox(t *testing.T) {
+	ctx := context.Background()
+	pool := startDB(t)
+	r := repo.NewRepo(pool)
+	uid, eventID := newID(t), newID(t)
+	const consumer = "user-profile-reviews"
+
+	// Профиль продавца ещё не создан — метод создаёт его по умолчанию (FK
+	// user_ratings_cache → profiles), затем пишет кеш и отмечает inbox.
+	def := domain.NewDefaultProfile(uid, "", time.Now().UTC())
+	require.NoError(t, r.UpsertRatingWithInbox(ctx, def, domain.Rating{AvgRating: 4.5, ReviewsCount: 2}, consumer, eventID))
+
+	rt, err := r.GetRating(ctx, uid)
+	require.NoError(t, err)
+	assert.InDelta(t, 4.5, rt.AvgRating, 0.001)
+	assert.Equal(t, 2, rt.ReviewsCount)
+
+	processed, err := r.IsEventProcessed(ctx, consumer, eventID)
+	require.NoError(t, err)
+	assert.True(t, processed, "событие отмечено обработанным (inbox)")
+
+	// Новый пересчёт (другое событие) перезаписывает кеш к текущему агрегату.
+	require.NoError(t, r.UpsertRatingWithInbox(ctx, def, domain.Rating{AvgRating: 3.67, ReviewsCount: 3}, consumer, newID(t)))
+	rt, err = r.GetRating(ctx, uid)
+	require.NoError(t, err)
+	assert.InDelta(t, 3.67, rt.AvgRating, 0.001)
+	assert.Equal(t, 3, rt.ReviewsCount)
+
+	// Ровно одна строка кеша на продавца (UPSERT, не вставка дублей).
+	var n int
+	require.NoError(t, pool.QueryRow(ctx, `SELECT count(*) FROM user_ratings_cache WHERE user_id=$1`, uid).Scan(&n))
+	assert.Equal(t, 1, n)
+}
+
 func TestRepo_ReplaceNotificationPrefs(t *testing.T) {
 	ctx := context.Background()
 	r := repo.NewRepo(startDB(t))

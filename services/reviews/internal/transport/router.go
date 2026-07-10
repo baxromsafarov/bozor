@@ -39,6 +39,10 @@ func NewRouter(d Deps) http.Handler {
 	}
 
 	if d.Reviews != nil {
+		// Внутренний эндпоинт (только сеть compose, без авторизации): агрегат
+		// рейтинга продавца для кеша Profile (9.2), как /internal/ads Listing.
+		r.Get("/internal/users/{userID}/rating", d.Reviews.Rating)
+
 		r.Group(func(api chi.Router) {
 			api.Use(authx.FromForwardedHeaders)
 

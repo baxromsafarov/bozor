@@ -500,14 +500,15 @@ services:
       POSTGRES_PORT: ${POSTGRES_PORT}
       PGBOUNCER_HOST: ${PGBOUNCER_HOST}
       PGBOUNCER_PORT: ${PGBOUNCER_PORT}
-      NATS_URL: ${NATS_URL}                     # потребление bozor.user.created, публикация bozor.user.updated
+      NATS_URL: ${NATS_URL}                     # потребление bozor.user.created/bozor.review.created, публикация bozor.user.updated
+      REVIEWS_INTERNAL_URL: http://reviews:8080  # агрегатор рейтинга перечитывает рейтинг продавца (fetch-current-state)
       OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT}
     depends_on:
       postgres:
         condition: service_healthy
       pgbouncer:
         condition: service_healthy
-      nats:                  # consume bozor.user.created / publish bozor.user.updated
+      nats:                  # consume bozor.user.created/bozor.review.created / publish bozor.user.updated
         condition: service_healthy
       tempo:
         condition: service_started

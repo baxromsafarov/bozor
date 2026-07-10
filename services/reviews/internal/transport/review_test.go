@@ -23,6 +23,7 @@ func discardLog() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard,
 type fakeStore struct {
 	createErr error
 	list      []domain.Review
+	rating    domain.Rating
 }
 
 func (f *fakeStore) CreateWithEvent(context.Context, domain.Review, events.Envelope) error {
@@ -30,6 +31,9 @@ func (f *fakeStore) CreateWithEvent(context.Context, domain.Review, events.Envel
 }
 func (f *fakeStore) ListByTarget(context.Context, string, int, int) ([]domain.Review, error) {
 	return f.list, nil
+}
+func (f *fakeStore) AggregateRating(context.Context, string) (domain.Rating, error) {
+	return f.rating, nil
 }
 
 type fakeAds struct {
@@ -115,4 +119,13 @@ func TestListByUser_200(t *testing.T) {
 	require.Equal(t, http.StatusOK, rec.Code)
 	assert.Contains(t, rec.Body.String(), `"reviews"`)
 	assert.Contains(t, rec.Body.String(), `"r1"`)
+}
+
+func TestRating_Internal_200(t *testing.T) {
+	store := &fakeStore{rating: domain.Rating{AvgRating: 4.5, ReviewsCount: 2}}
+	rec := do(t, server(store, &fakeAds{}, ""), http.MethodGet, "/internal/users/seller-1/rating", "")
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.Contains(t, rec.Body.String(), `"avg_rating":4.5`)
+	assert.Contains(t, rec.Body.String(), `"reviews_count":2`)
+	assert.Contains(t, rec.Body.String(), `"seller-1"`)
 }

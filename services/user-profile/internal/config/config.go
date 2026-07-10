@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/url"
 	"strings"
+	"time"
 
 	"bozor/pkg/shared/config"
 )
@@ -26,8 +27,11 @@ type Config struct {
 	MigrateDSN string
 
 	// NATSURL — адрес NATS JetStream (потребление bozor.user.created,
-	// публикация bozor.user.updated из outbox).
+	// bozor.review.created; публикация bozor.user.updated из outbox).
 	NATSURL string
+	// ReviewsInternalURL — базовый URL внутреннего эндпоинта Reviews: агрегатор
+	// рейтинга перечитывает актуальный рейтинг продавца (fetch-current-state).
+	ReviewsInternalURL string
 }
 
 // Load читает конфигурацию из окружения (fail-fast на обязательных ключах).
@@ -49,9 +53,13 @@ func Load() (*Config, error) {
 		MigrateDSN: dsn(user, pass,
 			config.String("POSTGRES_HOST", "postgres"),
 			config.String("POSTGRES_PORT", "5432")),
-		NATSURL: config.String("NATS_URL", "nats://nats:4222"),
+		NATSURL:            config.String("NATS_URL", "nats://nats:4222"),
+		ReviewsInternalURL: config.String("REVIEWS_INTERNAL_URL", "http://reviews:8080"),
 	}, nil
 }
+
+// ReviewsTimeout — таймаут чтения агрегата рейтинга из Reviews.
+const ReviewsTimeout = 5 * time.Second
 
 // Addr возвращает адрес прослушивания сервиса (для сервера и self health-check).
 func Addr() string {

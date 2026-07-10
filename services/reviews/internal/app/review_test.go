@@ -22,6 +22,7 @@ type fakeStore struct {
 	ev        events.Envelope
 	createErr error
 	list      []domain.Review
+	rating    domain.Rating
 }
 
 func (f *fakeStore) CreateWithEvent(_ context.Context, rev domain.Review, ev events.Envelope) error {
@@ -35,6 +36,10 @@ func (f *fakeStore) CreateWithEvent(_ context.Context, rev domain.Review, ev eve
 
 func (f *fakeStore) ListByTarget(_ context.Context, _ string, _, _ int) ([]domain.Review, error) {
 	return f.list, nil
+}
+
+func (f *fakeStore) AggregateRating(_ context.Context, _ string) (domain.Rating, error) {
+	return f.rating, nil
 }
 
 type fakeAds struct {
@@ -65,7 +70,16 @@ func TestCreate_Success(t *testing.T) {
 	var payload ReviewEvent
 	require.NoError(t, store.ev.Decode(&payload))
 	assert.Equal(t, "seller-1", payload.TargetID)
+	assert.Equal(t, "seller-1", payload.UserID, "получатель уведомления = продавец (конвенция Notification)")
 	assert.Equal(t, 5, payload.Rating)
+}
+
+func TestRating_DelegatesToStore(t *testing.T) {
+	store := &fakeStore{rating: domain.Rating{AvgRating: 4.5, ReviewsCount: 2}}
+	got, err := NewService(store, &fakeAds{}, discardLog()).Rating(context.Background(), "seller-1")
+	require.NoError(t, err)
+	assert.Equal(t, 4.5, got.AvgRating)
+	assert.Equal(t, 2, got.ReviewsCount)
 }
 
 func TestCreate_SelfReviewRejected(t *testing.T) {

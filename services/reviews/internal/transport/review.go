@@ -51,6 +51,13 @@ type reviewsResponse struct {
 	Reviews []reviewDTO `json:"reviews"`
 }
 
+// ratingResponse — агрегат рейтинга продавца (внутренний эндпоинт для Profile 9.2).
+type ratingResponse struct {
+	UserID       string  `json:"user_id"`
+	AvgRating    float64 `json:"avg_rating"`
+	ReviewsCount int     `json:"reviews_count"`
+}
+
 // Create создаёт отзыв текущего пользователя о продавце по объявлению.
 func (h *ReviewHandler) Create(w http.ResponseWriter, r *http.Request) {
 	var req createReviewRequest
@@ -88,6 +95,21 @@ func (h *ReviewHandler) ListByUser(w http.ResponseWriter, r *http.Request) {
 		out.Reviews = append(out.Reviews, toDTO(rev))
 	}
 	httpx.Respond(w, http.StatusOK, out)
+}
+
+// Rating отдаёт агрегат рейтинга продавца по активным отзывам. Внутренний
+// эндпоинт (только сеть compose, без пользовательской авторизации — как
+// /internal/ads Listing): его читает агрегатор рейтинга Profile (9.2).
+func (h *ReviewHandler) Rating(w http.ResponseWriter, r *http.Request) {
+	userID := chi.URLParam(r, "userID")
+	rt, err := h.svc.Rating(r.Context(), userID)
+	if err != nil {
+		h.writeError(w, r, err)
+		return
+	}
+	httpx.Respond(w, http.StatusOK, ratingResponse{
+		UserID: userID, AvgRating: rt.AvgRating, ReviewsCount: rt.ReviewsCount,
+	})
 }
 
 // writeError переводит доменную ошибку в ответ RFC 7807.

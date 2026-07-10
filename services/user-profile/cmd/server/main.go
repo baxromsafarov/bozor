@@ -27,6 +27,7 @@ import (
 	"bozor/services/user-profile/internal/app"
 	"bozor/services/user-profile/internal/config"
 	"bozor/services/user-profile/internal/repo"
+	"bozor/services/user-profile/internal/reviewsclient"
 	"bozor/services/user-profile/internal/transport"
 	"bozor/services/user-profile/internal/worker"
 	"bozor/services/user-profile/migrations"
@@ -119,6 +120,17 @@ func run() error {
 		return fmt.Errorf("консьюмер bozor.user.created: %w", err)
 	}
 	defer cc.Stop()
+
+	// Консьюмер bozor.review.created: пересчёт кеша агрегированного рейтинга
+	// продавца (агрегат перечитывается из Reviews, fetch-current-state; inbox).
+	reviews := worker.NewReviews(profileRepo,
+		reviewsclient.New(cfg.ReviewsInternalURL, config.ReviewsTimeout), log)
+	rc, err := natsx.Consume(ctx, js, events.StreamName, worker.ReviewsConsumer,
+		[]string{events.SubjectReviewCreated}, 3, reviews.Handle)
+	if err != nil {
+		return fmt.Errorf("консьюмер bozor.review.created: %w", err)
+	}
+	defer rc.Stop()
 
 	svc := app.NewService(profileRepo, log)
 	handler := transport.NewHandler(svc, log)

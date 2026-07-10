@@ -112,12 +112,29 @@ func TestReviewsRepo_ListByTargetAndBlock(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, list, 2, "только отзывы о seller")
 
-	// Снятие модератором: отзыв уходит из публичной ленты.
+	// Агрегат рейтинга по активным отзывам seller: (5+3)/2 = 4.0, count=2.
+	rt, err := r.AggregateRating(ctx, seller)
+	require.NoError(t, err)
+	assert.Equal(t, 2, rt.ReviewsCount)
+	assert.InDelta(t, 4.0, rt.AvgRating, 0.001)
+
+	// Снятие модератором: отзыв уходит из публичной ленты И из агрегата рейтинга.
 	require.NoError(t, r.BlockReview(ctx, r1.ID))
 	list, err = r.ListByTarget(ctx, seller, 20, 0)
 	require.NoError(t, err)
 	require.Len(t, list, 1, "снятый отзыв скрыт из ленты")
 	assert.Equal(t, r2.ID, list[0].ID)
+
+	rt, err = r.AggregateRating(ctx, seller)
+	require.NoError(t, err)
+	assert.Equal(t, 1, rt.ReviewsCount, "снятый отзыв не учитывается в рейтинге")
+	assert.InDelta(t, 3.0, rt.AvgRating, 0.001)
+
+	// Нет отзывов — нулевой рейтинг (0/0), не ошибка.
+	empty, err := r.AggregateRating(ctx, uuid.NewString())
+	require.NoError(t, err)
+	assert.Equal(t, 0, empty.ReviewsCount)
+	assert.Equal(t, 0.0, empty.AvgRating)
 
 	// Повторное снятие идемпотентно (не ошибка).
 	require.NoError(t, r.BlockReview(ctx, r1.ID))

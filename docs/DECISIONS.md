@@ -1612,4 +1612,40 @@ Listing — источник истины статуса объявления и
 
 ---
 
+## ADR-046: Агрегированный рейтинг продавца — кеш в Profile по bozor.review.created, агрегат перечитывается из Reviews (fetch-current-state), user_id=адресат в событии для уведомления продавца
+
+**Дата:** 2026-07-10
+**Статус:** принято
+**Контекст:** Stage 9.2 (ROADMAP), завершение CHAPTER 9 (Reviews & Ratings). ARCHITECTURE §4.13/§4.10.
+
+Отдельные отзывы живут в Reviews (9.1, ADR-045). Карточке продавца нужен агрегат — средняя оценка и число отзывов — читаемый на горячем пути (публичный профиль). Плюс продавца надо уведомлять о новом отзыве. Схема Profile под это заранее заготовлена (`user_ratings_cache`, `processed_events`, комментарий миграции 00001 «обновляется по bozor.review.created»), read-путь тоже (`publicProfileResponse.Rating`); недоставало write-пути и маршрутизации уведомления.
+
+### Развилки
+
+**(1) Где живёт агрегат? (кеш в Profile; источник истины — Reviews).**
+Агрегат — денормализация под чтение карточки продавца, поэтому кешируется в Profile (`user_ratings_cache`: avg_rating numeric(3,2), reviews_count) рядом с профилем — один запрос отдаёт профиль и рейтинг. Источником истины по отдельным отзывам остаётся Reviews; Profile хранит лишь производное. Так публичный профиль не ходит в Reviews на каждый GET.
+
+**(2) Как считается агрегат — инкрементально из события или пересчётом? (пересчёт из Reviews, fetch-current-state, ADR-024).**
+Новый durable-консьюмер Profile `user-profile-reviews` на `bozor.review.created` НЕ доверяет оценке из события (в нём лишь одна оценка), а перечитывает актуальный агрегат из Reviews: внутренний `GET /internal/users/{id}/rating` (только сеть compose, без авторизации — как `/internal/ads` Listing) отдаёт `COUNT(*)`/`AVG(rating)` по `status='active'`. Это ровно паттерн fetch-current-state всего проекта (Search←Listing, payments←Listing, reviews←Listing): (а) устойчиво к повторной доставке и переупорядочиванию — пересчёт всегда даёт текущее значение; (б) снятые модератором отзывы (`status='blocked'`) автоматически выпадают из агрегата — не нужен отдельный столбец суммы и коррекция при снятии; (в) отсутствие отзывов → нулевой рейтинг (0/0). Альтернатива (инкремент `count+1`, running-sum из события) потребовала бы столбца суммы и «сжигала» бы снятые отзывы в агрегате — отвергнута. Идемпотентность усилена inbox (`processed_events`): обработанное событие не дёргает Reviews повторно.
+
+**(3) Уведомление продавцу — новый механизм или общий конвейер Notification? (общий; событие несёт user_id=адресат).**
+Notification уже полностью подключён к `bozor.review.created` (шаблон «⭐ новый отзыв», группа настроек `review`, подписка консьюмера доставки). Его обобщённый обработчик берёт получателя из поля `user_id` события (эта конвенция единая для всех потребляемых им событий). Поэтому Reviews при публикации `bozor.review.created` кладёт `user_id = target_id` (адресат отзыва = продавец = получатель уведомления). Кода в Notification не потребовалось. Событие несёт и `user_id` (получатель, конвенция Notification), и `target_id` (доменный адресат для агрегатора) — они совпадают; агрегатор Profile декодирует `target_id`.
+
+**(4) FK кеша на профиль — что если у продавца ещё нет профиля? (создать по умолчанию в той же транзакции).**
+`user_ratings_cache.user_id` ссылается на `profiles` (ON DELETE CASCADE). Продавец мог ещё не открывать `/me` (профиль создаётся лениво/по `bozor.user.created`). `UpsertRatingWithInbox` одной транзакцией: `INSERT profiles ... ON CONFLICT DO NOTHING` (гарантирует FK) → UPSERT кеша → `MarkProcessed` (inbox).
+
+### Детали решения
+
+- **Reviews:** `repo.AggregateRating` (COUNT/AVG по active), `app.Service.Rating`, внутренний `GET /internal/users/{id}/rating` (без авторизации, вне auth-группы роутера). Событие `bozor.review.created` += `user_id` (= target_id).
+- **Profile:** `reviewsclient` (внутренний клиент Reviews); консьюмер `worker.Reviews` (`user-profile-reviews`) на `bozor.review.created` → fetch агрегата → `repo.UpsertRatingWithInbox` (ensure-profile + upsert + inbox одной tx); `config.ReviewsInternalURL` (`REVIEWS_INTERNAL_URL`). Read-путь (`publicProfileResponse.Rating`) уже был.
+- **Notification:** без изменений — шаблон/подписка/группа `review` были заготовлены; корректная маршрутизация обеспечена полем `user_id` события.
+- **Инфра:** compose user-profile += `REVIEWS_INTERNAL_URL` (внутренний HTTP-dep без `depends_on` — как favorites→listing, вызов на событии с ретраем).
+
+### Последствия
+
+- Рейтинг продавца обновляется автоматически и честно (по активным отзывам), продавец уведомляется. Проверено вживую (reviews+user-profile пересобраны healthy): на продавце `1111…` два отзыва от разных покупателей по разным объявлениям (оценки 5 и 4) → консьюмер Profile `user-profile-reviews` дважды перечитал агрегат из Reviews (лог «обновление рейтинга по отзыву», reviews_count=2) → `user_ratings_cache` = avg 4.50/count 2 → публичный профиль `GET /api/v1/users/1111…` вернул `"rating":{"avg_rating":4.5,"reviews_count":2}` → Notification спроецировал получателя = продавец (журнал: 2 записи `bozor.review.created` user_id=1111…, статус skipped/channel_disabled — в dev нет токена бота, получатель разрешён корректно). Побочно: новый durable-консьюмер на первом старте прочитал исторический `bozor.review.created` из стрима и пересчитал рейтинг (count=0, т.к. тот отзыв был снят/удалён) — ожидаемый одноразовый backfill (как listing-promotion в 8.6). Тесты: unit reviews (repo AggregateRating через integration; app Rating делегирует; transport internal 200; событие несёт user_id=target) + unit profile (worker Reviews: пересчёт из Reviews не из события/inbox-идемпотентность/пустой target ошибка/недоступность Reviews→повтор без записи кеша; reviewsclient 200/ошибка статуса) + integration profile (`UpsertRatingWithInbox`: ensure-profile под FK, UPSERT перезаписывает к текущему агрегату, inbox, одна строка кеша) + integration reviews (`AggregateRating` считает active, снятый отзыв выпадает, нет отзывов→0/0) — go test PASS (unit + integration reviews 6.8s / profile 17.6s); golangci-lint 0 issues; gofmt чисто. Тест-данные (2 отзыва, кеш рейтинга, 2 уведомления) вычищены.
+- **Условия пересмотра:** снятие отзыва модератором обновляет кеш лишь при следующем `bozor.review.created` (Profile потребляет только created; `bozor.review.blocked` от модерации не несёт target_id) — приемлемо для рейтинга (самоизлечение пересчётом); при необходимости мгновенного отражения Reviews может публиковать target-несущее событие при снятии. Гистограмма распределения оценок, «проверенные» отзывы (по факту сделки), пересчёт по расписанию как страховка от рассинхронизации кеша, вынос агрегата в материализованное представление при росте — на будущее. CHAPTER 9 (Reviews & Ratings: 9.1 модель+создание, 9.2 агрегированный рейтинг) полностью завершён.
+
+---
+
 *Конец журнала. Новые решения добавляются в конец с очередным номером ADR.*

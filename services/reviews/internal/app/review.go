@@ -26,6 +26,7 @@ const (
 type Store interface {
 	CreateWithEvent(ctx context.Context, rev domain.Review, ev events.Envelope) error
 	ListByTarget(ctx context.Context, targetID string, limit, offset int) ([]domain.Review, error)
+	AggregateRating(ctx context.Context, targetID string) (domain.Rating, error)
 }
 
 // Ads — чтение объявления из Listing (владелец = адресат отзыва).
@@ -103,9 +104,19 @@ func (s *Service) ListByUser(ctx context.Context, targetID string, limit, offset
 	return s.store.ListByTarget(ctx, targetID, clampLimit(limit), clampOffset(offset))
 }
 
-// ReviewEvent — полезная нагрузка bozor.review.created (агрегатор рейтинга 9.2
-// пересчитывает avg_rating/count адресата; Notification уведомляет продавца).
+// Rating возвращает агрегат рейтинга продавца по активным отзывам (для кеша
+// Profile через внутренний эндпоинт, fetch-current-state 9.2).
+func (s *Service) Rating(ctx context.Context, targetID string) (domain.Rating, error) {
+	return s.store.AggregateRating(ctx, targetID)
+}
+
+// ReviewEvent — полезная нагрузка bozor.review.created. Агрегатор рейтинга (Profile
+// 9.2) пересчитывает avg_rating/count адресата; Notification уведомляет продавца.
+// UserID — получатель уведомления по общей конвенции Notification (поле user_id
+// есть у каждого потребляемого им события); для отзыва получатель = продавец, то
+// есть UserID зеркалит TargetID (адресата отзыва).
 type ReviewEvent struct {
+	UserID   string `json:"user_id"`
 	ReviewID string `json:"review_id"`
 	AdID     string `json:"ad_id"`
 	AuthorID string `json:"author_id"`
@@ -116,6 +127,7 @@ type ReviewEvent struct {
 // NewReviewEvent собирает нагрузку события создания отзыва.
 func NewReviewEvent(rev domain.Review) ReviewEvent {
 	return ReviewEvent{
+		UserID:   rev.TargetID,
 		ReviewID: rev.ID, AdID: rev.AdID, AuthorID: rev.AuthorID,
 		TargetID: rev.TargetID, Rating: rev.Rating,
 	}
